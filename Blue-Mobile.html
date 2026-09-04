@@ -763,20 +763,24 @@ body.locked{ overflow:hidden; }
                   <div class="tri-grid">
                     <div class="field">
                       <label for="sale-wholesale" data-i18n="field_wholesale">Wholesale Price</label>
-                      <input type="number" id="sale-wholesale" inputmode="decimal" min="0" max="1000000" step="0.01" placeholder="0.00" required>
+                      <input type="text" id="sale-wholesale" inputmode="decimal" min="0" max="1000000" step="0.01" placeholder="0.00" required>
                     </div>
                     <div class="field">
                       <label for="sale-price" data-i18n="field_price">Selling Price</label>
-                      <input type="number" id="sale-price" inputmode="decimal" min="0" max="1000000" step="0.01" placeholder="0.00" required>
+                      <input type="text" id="sale-price" inputmode="decimal" min="0" max="1000000" step="0.01" placeholder="0.00" required>
                     </div>
                     <div class="field">
                       <label for="sale-qty" data-i18n="field_qty">Quantity</label>
-                      <input type="number" id="sale-qty" inputmode="numeric" min="1" max="100000" step="1" value="1" required>
+                      <input type="text" id="sale-qty" inputmode="numeric" pattern="[0-9]*" min="1" max="100000" step="1" value="1" required>
                     </div>
                   </div>
                   <div class="field full">
                     <label data-i18n="field_payment">Payment Method</label>
                     <div class="radio-group" id="payment-methods"></div>
+                  </div>
+                  <div class="field full" id="sale-day-field">
+                    <label for="sale-day-select" data-i18n="field_sale_day">Day</label>
+                    <select id="sale-day-select"></select>
                   </div>
                   <div class="field full">
                     <div class="total-preview">
@@ -1142,8 +1146,8 @@ const I18N = {
     new_sale:"New Sale",
     field_product:"Product Name", ph_product_name:"e.g. 33W Charger",
     field_qty:"Quantity", field_price:"Selling Price", field_wholesale:"Wholesale Price",
-    field_total:"Total", field_profit:"Profit", field_payment:"Payment Method",
-    pay_cash:"Cash", pay_card:"Card",
+    field_total:"Total", field_profit:"Profit", field_payment:"Payment Method", field_sale_day:"Day",
+    pay_cash:"Cash", pay_card:"Card", pay_unpaid:"Unpaid",
     record_sale:"Record Sale", update_sale:"Update Sale", cancel_edit:"Cancel Edit",
     toggle_theme:"Toggle theme", language:"Language", date_filter:"Date filter",
     /* account + sign in */
@@ -1253,8 +1257,8 @@ const I18N = {
     new_sale:"عملية بيع جديدة",
     field_product:"اسم المنتج", ph_product_name:"مثال: شاحن 33 واط",
     field_qty:"الكمية", field_price:"سعر البيع", field_wholesale:"سعر الجملة",
-    field_total:"الإجمالي", field_profit:"الربح", field_payment:"طريقة الدفع",
-    pay_cash:"نقدًا", pay_card:"بطاقة",
+    field_total:"الإجمالي", field_profit:"الربح", field_payment:"طريقة الدفع", field_sale_day:"اليوم",
+    pay_cash:"نقدًا", pay_card:"بطاقة", pay_unpaid:"غير خالص",
     record_sale:"تسجيل البيع", update_sale:"تحديث البيع", cancel_edit:"إلغاء التعديل",
     toggle_theme:"تبديل المظهر", language:"اللغة", date_filter:"تصفية بالتاريخ",
     /* الحساب وتسجيل الدخول */
@@ -1348,7 +1352,8 @@ const I18N = {
    --------------------------------------------------------------- */
 const PAYMENT_METHODS = [
   { id:"cash", i18n:"pay_cash", emoji:"💵" },
-  { id:"card", i18n:"pay_card", emoji:"💳" }
+  { id:"card", i18n:"pay_card", emoji:"💳" },
+  { id:"unpaid", i18n:"pay_unpaid", emoji:"⏳" }
 ];
 const PAYMENT_IDS = PAYMENT_METHODS.map(p => p.id);
 function paymentLabel(id){
@@ -1688,8 +1693,8 @@ document.getElementById("confirm-ok-btn").addEventListener("click", ()=>{
 function activeSession(){ return state.sessions.find(s => s.status === "open") || null; }
 function sessionById(id){ return state.sessions.find(s => s.id === id) || null; }
 function isSaleEditable(sale){
-  const s = sessionById(sale.sessionId);
-  return !!s && s.status === "open";
+  // يمكن تعديل أو حذف أي عملية بيع بغض النظر عن حالة يومها
+  return true;
 }
 
 function openStartDayModal(){
@@ -2048,6 +2053,19 @@ function updateTotalPreview(){
 ["sale-qty","sale-price","sale-wholesale"].forEach(id=>{
   document.getElementById(id).addEventListener("input", updateTotalPreview);
 });
+document.getElementById("sale-qty").addEventListener("input", function(){
+  this.value = this.value.replace(/[^0-9]/g, "");
+});
+function sanitizeDecimalInput(el){
+  el.addEventListener("input", function(){
+    let v = this.value.replace(/[^0-9.]/g, "");
+    const dot = v.indexOf(".");
+    if(dot !== -1) v = v.slice(0, dot + 1) + v.slice(dot + 1).replace(/\./g, "");
+    this.value = v;
+  });
+}
+sanitizeDecimalInput(document.getElementById("sale-price"));
+sanitizeDecimalInput(document.getElementById("sale-wholesale"));
 
 function updateSaleSubmitLabel(){
   const editing = !!document.getElementById("sale-edit-id").value;
@@ -2098,6 +2116,17 @@ function startNewSale(){
 
 document.getElementById("new-sale-btn").addEventListener("click", startNewSale);
 
+function populateDaySelect(){
+  const select = document.getElementById("sale-day-select");
+  if(!select) return;
+  const prev = select.value;
+  const sorted = state.sessions.slice().sort((a,b) => (b.date || "").localeCompare(a.date || ""));
+  select.innerHTML = sorted.map(s => `<option value="${s.id}">${escapeHtml(s.dayName)} · ${formatDate(s.date)}${s.status === "closed" ? " (" + t("day_closed_badge") + ")" : ""}</option>`).join("");
+  const openSession = activeSession();
+  const wanted = prev && sorted.some(s => s.id === prev) ? prev : (openSession ? openSession.id : (sorted[0] ? sorted[0].id : ""));
+  select.value = wanted;
+}
+
 function resetSaleForm(){
   hideSavedSale();
   const form = document.getElementById("sale-form");
@@ -2108,9 +2137,12 @@ function resetSaleForm(){
   document.getElementById("sale-edit-id").value = "";
   state.paymentMethod = PAYMENT_IDS[0];
   renderPaymentChips();
+  populateDaySelect();
+  document.getElementById("sale-day-field").style.display = "";
   updateTotalPreview();
   updateSaleSubmitLabel();
   closeSuggestions();
+  renderSalesGuard();
 }
 
 document.getElementById("sale-cancel-edit-btn").addEventListener("click", ()=>{
@@ -2123,8 +2155,8 @@ document.getElementById("sale-form").addEventListener("submit", async function(e
   e.preventDefault();
   closeSuggestions();
 
-  const session = activeSession();
   const editId = document.getElementById("sale-edit-id").value;
+  const targetDayId = document.getElementById("sale-day-select").value;
   const rawName = document.getElementById("sale-product").value;
   const name = String(rawName || "").replace(/\s+/g, " ").trim();
   const qty = parseInt(document.getElementById("sale-qty").value, 10);
@@ -2141,7 +2173,6 @@ document.getElementById("sale-form").addEventListener("submit", async function(e
 
   /* The database is the one that multiplies and subtracts: we send the
      four inputs, it returns the stored row with total / cost / profit. */
-  const payload = { product: name, qty, price, wholesale, payment };
   const submitBtn = document.getElementById("sale-submit-btn");
   let saved = null;
 
@@ -2150,14 +2181,13 @@ document.getElementById("sale-form").addEventListener("submit", async function(e
     if(editId){
       const sale = state.sales.find(s => s.id === editId);
       if(!sale){ resetSaleForm(); return; }
-      if(!isSaleEditable(sale)){ showToast(t("err_day_closed"), "error"); resetSaleForm(); renderAll(); return; }
-      const res = await apiPut("/sales/" + editId, payload);
+      const res = await apiPut("/sales/" + editId, { product: name, qty, price, wholesale, payment });
       Object.assign(sale, res.sale);
       saved = sale;
       showToast(t("sale_updated"));
     } else {
-      if(!session){ showToast(t("err_no_day"), "error"); return; }
-      const res = await apiPost("/sales", payload);
+      if(!targetDayId){ showToast(t("err_no_day"), "error"); return; }
+      const res = await apiPost("/sales", { product: name, qty, price, wholesale, payment, dayId: targetDayId });
       state.sales.unshift(res.sale);
       saved = res.sale;
       showToast(t("sale_added"));
@@ -2181,7 +2211,7 @@ document.getElementById("sale-form").addEventListener("submit", async function(e
 function editSale(id){
   const sale = state.sales.find(s => s.id === id);
   if(!sale) return;
-  if(!isSaleEditable(sale)){ showToast(t("err_day_closed"), "error"); return; }
+  showSection("sales");
   document.getElementById("sale-product").value = sale.product;
   document.getElementById("sale-qty").value = sale.qty;
   document.getElementById("sale-price").value = sale.price;
@@ -2189,16 +2219,18 @@ function editSale(id){
   document.getElementById("sale-edit-id").value = sale.id;
   state.paymentMethod = sale.payment;
   renderPaymentChips();
+  document.getElementById("sale-day-field").style.display = "none";
+  hideSavedSale();
   updateTotalPreview();
   updateSaleSubmitLabel();
   closeSuggestions();
+  renderSalesGuard();
   document.getElementById("sale-form").scrollIntoView({ behavior:"smooth", block:"center" });
 }
 
 function deleteSale(id){
   const sale = state.sales.find(s => s.id === id);
   if(!sale) return;
-  if(!isSaleEditable(sale)){ showToast(t("err_day_closed"), "error"); return; }
   askConfirm("confirm_delete_title", "confirm_delete_sale", "delete", async ()=>{
     try{
       await apiDel("/sales/" + id);
@@ -2318,13 +2350,17 @@ function updateSessionPill(){
 function renderSalesGuard(){
   const guard = document.getElementById("sales-guard");
   const active = document.getElementById("sales-active-wrap");
-  if(activeSession()){
+  const hasAnyDay = state.sessions.length > 0;
+  const editing = !!document.getElementById("sale-edit-id").value;
+  if(hasAnyDay || editing){
     guard.style.display = "none";
     active.style.display = "block";
   } else {
     guard.style.display = "flex";
     active.style.display = "none";
   }
+  const liveSummaryPanel = document.getElementById("close-day-btn").closest(".panel");
+  if(liveSummaryPanel) liveSummaryPanel.style.display = activeSession() ? "" : "none";
 }
 
 function filteredSales(){
@@ -2762,6 +2798,7 @@ function renderAll(){
   renderNotes();
   renderReports();
   updateSessionPill();
+  populateDaySelect();
 }
 
 /* Pull the whole ledger again — used after an error, or when another
