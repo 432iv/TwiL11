@@ -1,8 +1,4 @@
 "use strict";
-/* /api/sales — the ledger itself.
-   total / wholesale_total / profit are computed by the database
-   (generated columns), never trusted from the client.
-   Nothing here touches stock: there is no stock.                    */
 const express = require("express");
 const db = require("../db");
 const { wrap, HttpError, cleanText, toInt, toMoney, isoDate } = require("../lib/http");
@@ -11,10 +7,9 @@ const { rememberName } = require("./products");
 
 const router = express.Router();
 
-async function assertEditableDay(dayId) {
-  const { rows } = await db.query("SELECT id, status FROM days WHERE id = $1", [dayId]);
+async function getDay(dayId) {
+  const { rows } = await db.query("SELECT id, status, day_date FROM days WHERE id = $1", [dayId]);
   if (!rows.length) throw new HttpError(404, "day_not_found", "Day not found");
-  if (rows[0].status !== "open") throw new HttpError(409, "day_closed", "This day is closed");
   return rows[0];
 }
 
@@ -24,7 +19,6 @@ async function validPayment(code) {
   return rows[0].code;
 }
 
-/* list / filter: ?date=YYYY-MM-DD  ?dayId=  ?q=  ?limit= */
 router.get("/", wrap(async (req, res) => {
   const where = [], params = [];
   if (req.query.date)  { params.push(isoDate(req.query.date)); where.push(`sale_date = $${params.length}`); }
@@ -41,7 +35,6 @@ router.get("/", wrap(async (req, res) => {
   res.json({ sales: rows.map(mapSale) });
 }));
 
-/* daily summary: ?date= or ?dayId= (defaults to the open day) */
 router.get("/summary", wrap(async (req, res) => {
   let sql = `SELECT d.*, ${TOTALS_SELECT} FROM days d LEFT JOIN sales s ON s.day_id = d.id`;
   const params = [];
@@ -56,11 +49,15 @@ router.get("/summary", wrap(async (req, res) => {
   });
 }));
 
-/* create — always lands on the open day */
 router.post("/", wrap(async (req, res) => {
-  const open = await db.query("SELECT * FROM days WHERE status = 'open'");
-  if (!open.rows.length) throw new HttpError(409, "no_open_day", "Start a day first");
-  const day = open.rows[0];
+  let day;
+  if (req.body.dayId) {
+    day = await getDay(req.body.dayId);
+  } else {
+    const open = await db.query("SELECT * FROM days WHERE status = 'open'");
+    if (!open.rows.length) throw new HttpError(409, "no_open_day", "Start a day first");
+    day = open.rows[0];
+  }
 
   const product   = cleanText(req.body.product ?? req.body.product_name, { field: "product", max: 80 });
   const qty       = toInt(req.body.qty ?? req.body.quantity, { field: "qty" });
@@ -81,11 +78,9 @@ router.post("/", wrap(async (req, res) => {
   res.status(201).json({ sale: mapSale(sale) });
 }));
 
-/* update — only while the day is open */
 router.put("/:id", wrap(async (req, res) => {
   const found = await db.query("SELECT * FROM sales WHERE id = $1", [req.params.id]);
   if (!found.rows.length) throw new HttpError(404, "sale_not_found", "Sale not found");
-  await assertEditableDay(found.rows[0].day_id);
 
   const product   = cleanText(req.body.product ?? req.body.product_name, { field: "product", max: 80 });
   const qty       = toInt(req.body.qty ?? req.body.quantity, { field: "qty" });
@@ -105,11 +100,9 @@ router.put("/:id", wrap(async (req, res) => {
   res.json({ sale: mapSale(sale) });
 }));
 
-/* delete — only while the day is open */
 router.delete("/:id", wrap(async (req, res) => {
   const found = await db.query("SELECT * FROM sales WHERE id = $1", [req.params.id]);
   if (!found.rows.length) throw new HttpError(404, "sale_not_found", "Sale not found");
-  await assertEditableDay(found.rows[0].day_id);
   await db.query("DELETE FROM sales WHERE id = $1", [req.params.id]);
   res.json({ ok: true, id: String(req.params.id) });
 }));
