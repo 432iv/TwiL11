@@ -91,4 +91,16 @@ router.post("/:id/close", wrap(async (req, res) => {
   });
 }));
 
+/* delete a day entirely — removes its sales and notes too. Works for
+   both open and closed days. Irreversible, so the frontend confirms first. */
+router.delete("/:id", wrap(async (req, res) => {
+  const day = await dayById(req.params.id);
+  await db.tx(async client => {
+    await client.query("DELETE FROM sales WHERE day_id = $1", [day.id]);
+    await client.query("DELETE FROM notes WHERE day_id = $1", [day.id]);
+    await client.query("DELETE FROM days WHERE id = $1", [day.id]);
+  });
+  res.json({ ok: true, id: String(day.id) });
+}));
+
 module.exports = router;
