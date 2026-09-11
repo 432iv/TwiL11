@@ -2574,7 +2574,7 @@ let currentReportDetailId = null;
 function openReportDetail(id){
   const report = state.reports.find(r => r.id === id);
   if(!report) return;
-  currentReportDetailId = id;
+  currentReportDetailId = report.sessionId;
   document.getElementById("report-detail-title").textContent = `${report.dayName} — ${formatLongDate(report.date)}`;
   document.getElementById("report-detail-summary").innerHTML = `
     <div class="receipt-row"><span>${t("report_total_sales")}</span><span class="amt">${fmt(report.totals.total)}</span></div>
@@ -2616,16 +2616,16 @@ function openReportDetail(id){
   openModal("modal-reportdetail");
 }
 
-function deleteReportDay(id){
-  const report = state.reports.find(r => r.id === id);
+function deleteReportDay(dayId){
+  const report = state.reports.find(r => r.sessionId === dayId);
   if(!report) return;
   askConfirm("confirm_delete_day_title", "confirm_delete_day", "delete", async ()=>{
     try{
-      await apiDel("/days/" + id);
-      state.reports = state.reports.filter(r => r.id !== id);
-      state.sessions = state.sessions.filter(s => s.id !== id);
-      state.sales = state.sales.filter(s => s.sessionId !== id);
-      state.notes = state.notes.filter(nt => nt.sessionId !== id);
+      await apiDel("/days/" + dayId);
+      state.reports = state.reports.filter(r => r.sessionId !== dayId);
+      state.sessions = state.sessions.filter(s => s.id !== dayId);
+      state.sales = state.sales.filter(s => s.sessionId !== dayId);
+      state.notes = state.notes.filter(nt => nt.sessionId !== dayId);
       buildUsageIndex();
       closeModal("modal-reportdetail");
       renderAll();
