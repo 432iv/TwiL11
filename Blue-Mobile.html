@@ -3,10 +3,6 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<link rel="icon" type="image/png" href="/apple-touch-icon.png">
-
-
 <title>دفتر المبيعات — Blue Mobile</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1020,6 +1016,12 @@ body.locked{ overflow:hidden; }
       <button class="modal-close" data-close="modal-reportdetail"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
     </div>
     <div id="report-detail-summary" style="margin-bottom:16px;"></div>
+    <div class="modal-actions" style="margin-top:0; margin-bottom:16px; justify-content:flex-start;">
+      <button type="button" class="btn btn-danger" id="report-detail-delete-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>
+        <span data-i18n="delete_day_btn">Delete Day</span>
+      </button>
+    </div>
     <div class="table-wrap">
       <table>
         <thead>
@@ -1201,6 +1203,10 @@ const I18N = {
     day_details:"Day Details",
     no_reports_title:"No closed days yet",
     no_reports_desc:"Reports appear here once you close a day of sales.",
+    delete_day_btn:"Delete Day",
+    confirm_delete_day_title:"Delete this day?",
+    confirm_delete_day:"This permanently deletes this day along with all of its sales and notes. This cannot be undone.",
+    day_deleted:"Day deleted",
 
     settings_language:"Language", settings_language_desc:"Switch between English and Arabic",
     settings_theme:"Theme", settings_theme_desc:"Switch between dark and light mode",
@@ -1312,6 +1318,10 @@ const I18N = {
     day_details:"تفاصيل اليوم",
     no_reports_title:"لا توجد أيام مغلقة بعد",
     no_reports_desc:"تظهر التقارير هنا بعد إغلاق يوم من المبيعات.",
+    delete_day_btn:"حذف اليوم",
+    confirm_delete_day_title:"حذف هذا اليوم؟",
+    confirm_delete_day:"سيتم حذف هذا اليوم نهائيًا مع جميع مبيعاته وملاحظاته. لا يمكن التراجع عن هذا الإجراء.",
+    day_deleted:"تم حذف اليوم",
 
     settings_language:"اللغة", settings_language_desc:"التبديل بين العربية والإنجليزية",
     settings_theme:"المظهر", settings_theme_desc:"التبديل بين الوضع الداكن والفاتح",
@@ -2559,9 +2569,12 @@ function renderReports(){
   });
 }
 
+let currentReportDetailId = null;
+
 function openReportDetail(id){
   const report = state.reports.find(r => r.id === id);
   if(!report) return;
+  currentReportDetailId = id;
   document.getElementById("report-detail-title").textContent = `${report.dayName} — ${formatLongDate(report.date)}`;
   document.getElementById("report-detail-summary").innerHTML = `
     <div class="receipt-row"><span>${t("report_total_sales")}</span><span class="amt">${fmt(report.totals.total)}</span></div>
@@ -2602,6 +2615,28 @@ function openReportDetail(id){
 
   openModal("modal-reportdetail");
 }
+
+function deleteReportDay(id){
+  const report = state.reports.find(r => r.id === id);
+  if(!report) return;
+  askConfirm("confirm_delete_day_title", "confirm_delete_day", "delete", async ()=>{
+    try{
+      await apiDel("/days/" + id);
+      state.reports = state.reports.filter(r => r.id !== id);
+      state.sessions = state.sessions.filter(s => s.id !== id);
+      state.sales = state.sales.filter(s => s.sessionId !== id);
+      state.notes = state.notes.filter(nt => nt.sessionId !== id);
+      buildUsageIndex();
+      closeModal("modal-reportdetail");
+      renderAll();
+      showToast(t("day_deleted"));
+    }catch(err){ apiFail(err); await refreshFromServer(); }
+  });
+}
+
+document.getElementById("report-detail-delete-btn").addEventListener("click", ()=>{
+  if(currentReportDetailId) deleteReportDay(currentReportDetailId);
+});
 
 /* ---------------------------------------------------------------
    17. ACCOUNT + SIGN IN  (exactly one account, server-verified)
