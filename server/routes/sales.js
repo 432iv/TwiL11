@@ -19,6 +19,15 @@ async function validPayment(code) {
   return rows[0].code;
 }
 
+/* debtor name only makes sense (and is only kept) for unpaid sales.
+   Handled with plain string logic (not cleanText) since it is optional
+   and cleanText's contract for empty values isn't known here. */
+function resolveDebtorName(payment, raw) {
+  if (payment !== "unpaid") return null;
+  const name = String(raw || "").replace(/\s+/g, " ").trim().slice(0, 80);
+  return name || null;
+}
+
 router.get("/", wrap(async (req, res) => {
   const where = [], params = [];
   if (req.query.date)  { params.push(isoDate(req.query.date)); where.push(`sale_date = $${params.length}`); }
@@ -59,20 +68,21 @@ router.post("/", wrap(async (req, res) => {
     day = open.rows[0];
   }
 
-  const product   = cleanText(req.body.product ?? req.body.product_name, { field: "product", max: 80 });
-  const qty       = toInt(req.body.qty ?? req.body.quantity, { field: "qty" });
-  const price     = toMoney(req.body.price ?? req.body.selling_price, { field: "price" });
-  const wholesale = toMoney(req.body.wholesale ?? req.body.wholesale_price ?? 0, { field: "wholesale" });
-  const payment   = await validPayment(req.body.payment ?? req.body.payment_method);
+  const product     = cleanText(req.body.product ?? req.body.product_name, { field: "product", max: 80 });
+  const qty         = toInt(req.body.qty ?? req.body.quantity, { field: "qty" });
+  const price       = toMoney(req.body.price ?? req.body.selling_price, { field: "price" });
+  const wholesale   = toMoney(req.body.wholesale ?? req.body.wholesale_price ?? 0, { field: "wholesale" });
+  const payment     = await validPayment(req.body.payment ?? req.body.payment_method);
+  const debtorName  = resolveDebtorName(payment, req.body.debtorName ?? req.body.debtor_name);
 
   const sale = await db.tx(async client => {
     const canonical = await rememberName(client, product);
     const { rows } = await client.query(
       `INSERT INTO sales (day_id, invoice_no, product_name, quantity, wholesale_price,
-                          selling_price, payment_method, sale_date)
-       VALUES ($1, 'INV-' || lpad(nextval('invoice_seq')::text, 5, '0'), $2, $3, $4, $5, $6, $7)
+                          selling_price, payment_method, debtor_name, sale_date)
+       VALUES ($1, 'INV-' || lpad(nextval('invoice_seq')::text, 5, '0'), $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [day.id, canonical, qty, wholesale, price, payment, day.day_date]);
+      [day.id, canonical, qty, wholesale, price, payment, debtorName, day.day_date]);
     return rows[0];
   });
   res.status(201).json({ sale: mapSale(sale) });
@@ -82,19 +92,20 @@ router.put("/:id", wrap(async (req, res) => {
   const found = await db.query("SELECT * FROM sales WHERE id = $1", [req.params.id]);
   if (!found.rows.length) throw new HttpError(404, "sale_not_found", "Sale not found");
 
-  const product   = cleanText(req.body.product ?? req.body.product_name, { field: "product", max: 80 });
-  const qty       = toInt(req.body.qty ?? req.body.quantity, { field: "qty" });
-  const price     = toMoney(req.body.price ?? req.body.selling_price, { field: "price" });
-  const wholesale = toMoney(req.body.wholesale ?? req.body.wholesale_price ?? 0, { field: "wholesale" });
-  const payment   = await validPayment(req.body.payment ?? req.body.payment_method);
+  const product     = cleanText(req.body.product ?? req.body.product_name, { field: "product", max: 80 });
+  const qty         = toInt(req.body.qty ?? req.body.quantity, { field: "qty" });
+  const price       = toMoney(req.body.price ?? req.body.selling_price, { field: "price" });
+  const wholesale   = toMoney(req.body.wholesale ?? req.body.wholesale_price ?? 0, { field: "wholesale" });
+  const payment     = await validPayment(req.body.payment ?? req.body.payment_method);
+  const debtorName  = resolveDebtorName(payment, req.body.debtorName ?? req.body.debtor_name);
 
   const sale = await db.tx(async client => {
     const canonical = await rememberName(client, product);
     const { rows } = await client.query(
       `UPDATE sales SET product_name = $1, quantity = $2, wholesale_price = $3,
-                        selling_price = $4, payment_method = $5, updated_at = now()
-        WHERE id = $6 RETURNING *`,
-      [canonical, qty, wholesale, price, payment, req.params.id]);
+                        selling_price = $4, payment_method = $5, debtor_name = $6, updated_at = now()
+        WHERE id = $7 RETURNING *`,
+      [canonical, qty, wholesale, price, payment, debtorName, req.params.id]);
     return rows[0];
   });
   res.json({ sale: mapSale(sale) });
