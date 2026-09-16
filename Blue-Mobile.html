@@ -2,11 +2,6 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<link rel="icon" type="image/png" href="/D511B8E2-0D52-49F1-A9CC-15F0FF073BF8.png">
-<link rel="apple-touch-icon" href="/D511B8E2-0D52-49F1-A9CC-15F0FF073BF8.png">
-<link rel="icon" type="image/png" href="/icon.png">
-<link rel="apple-touch-icon" sizes="180x180" href="/icon.png">
-<meta name="theme-color" content="#0b1220">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>دفتر المبيعات — Blue Mobile</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -783,6 +778,10 @@ body.locked{ overflow:hidden; }
                     <label data-i18n="field_payment">Payment Method</label>
                     <div class="radio-group" id="payment-methods"></div>
                   </div>
+                  <div class="field full" id="sale-debtor-field" style="display:none;">
+                    <label for="sale-debtor-name" data-i18n="field_debtor_name">Owed by</label>
+                    <input type="text" id="sale-debtor-name" maxlength="80" data-i18n-placeholder="ph_debtor_name" placeholder="e.g. Ahmed">
+                  </div>
                   <div class="field full" id="sale-day-field">
                     <label for="sale-day-select" data-i18n="field_sale_day">Day</label>
                     <select id="sale-day-select"></select>
@@ -885,6 +884,7 @@ body.locked{ overflow:hidden; }
                     <th data-i18n="field_total">Total</th>
                     <th data-i18n="field_profit">Profit</th>
                     <th data-i18n="field_payment">Payment</th>
+                    <th data-i18n="col_debtor">Owed by</th>
                     <th data-i18n="field_date">Date</th>
                     <th data-i18n="field_time">Time</th>
                     <th data-i18n="col_actions">Actions</th>
@@ -1039,6 +1039,7 @@ body.locked{ overflow:hidden; }
             <th data-i18n="field_total">Total</th>
             <th data-i18n="field_profit">Profit</th>
             <th data-i18n="field_payment">Payment</th>
+            <th data-i18n="col_debtor">Owed by</th>
             <th data-i18n="field_time">Time</th>
           </tr>
         </thead>
@@ -1158,6 +1159,7 @@ const I18N = {
     field_product:"Product Name", ph_product_name:"e.g. 33W Charger",
     field_qty:"Quantity", field_price:"Selling Price", field_wholesale:"Wholesale Price",
     field_total:"Total", field_profit:"Profit", field_payment:"Payment Method", field_sale_day:"Day",
+    field_debtor_name:"Owed by", ph_debtor_name:"e.g. Ahmed", col_debtor:"Owed by",
     pay_cash:"Cash", pay_card:"Card", pay_unpaid:"Unpaid",
     record_sale:"Record Sale", update_sale:"Update Sale", cancel_edit:"Cancel Edit",
     toggle_theme:"Toggle theme", language:"Language", date_filter:"Date filter",
@@ -1273,6 +1275,7 @@ const I18N = {
     field_product:"اسم المنتج", ph_product_name:"مثال: شاحن 33 واط",
     field_qty:"الكمية", field_price:"سعر البيع", field_wholesale:"سعر الجملة",
     field_total:"الإجمالي", field_profit:"الربح", field_payment:"طريقة الدفع", field_sale_day:"اليوم",
+    field_debtor_name:"على من", ph_debtor_name:"مثال: أحمد", col_debtor:"على من",
     pay_cash:"نقدًا", pay_card:"بطاقة", pay_unpaid:"غير خالص",
     record_sale:"تسجيل البيع", update_sale:"تحديث البيع", cancel_edit:"إلغاء التعديل",
     toggle_theme:"تبديل المظهر", language:"اللغة", date_filter:"تصفية بالتاريخ",
@@ -2039,6 +2042,12 @@ productInput.addEventListener("keydown", (e)=>{
 /* ---------------------------------------------------------------
    11. SALE FORM — payment chips, live total, validation
    --------------------------------------------------------------- */
+function updateDebtorFieldVisibility(){
+  const field = document.getElementById("sale-debtor-field");
+  if(!field) return;
+  field.style.display = state.paymentMethod === "unpaid" ? "" : "none";
+}
+
 function renderPaymentChips(){
   const wrap = document.getElementById("payment-methods");
   wrap.innerHTML = PAYMENT_METHODS.map(m => `
@@ -2054,8 +2063,10 @@ function renderPaymentChips(){
         c.classList.toggle("selected", on);
         c.setAttribute("aria-pressed", on);
       });
+      updateDebtorFieldVisibility();
     });
   });
+  updateDebtorFieldVisibility();
 }
 
 function updateTotalPreview(){
@@ -2108,6 +2119,9 @@ function showSavedSale(sale, updated){
     [t("field_total"),     fmt(sale.total),          true],
     [t("field_profit"),    fmt(sale.profit),         true]
   ];
+  if(sale.payment === "unpaid" && sale.debtorName){
+    rows.push([t("field_debtor_name"), escapeHtml(sale.debtorName), false]);
+  }
   document.getElementById("saved-rows").innerHTML = rows.map(([k,v,mono]) =>
     `<div class="saved-row"><span class="k">${k}</span><span class="v${mono ? " mono" : ""}">${v}</span></div>`).join("");
   document.getElementById("saved-title").textContent = t(updated ? "sale_updated_title" : "sale_saved_title");
@@ -2154,6 +2168,7 @@ function resetSaleForm(){
   document.getElementById("sale-price").value = "";
   document.getElementById("sale-wholesale").value = "";
   document.getElementById("sale-edit-id").value = "";
+  document.getElementById("sale-debtor-name").value = "";
   state.paymentMethod = PAYMENT_IDS[0];
   renderPaymentChips();
   populateDaySelect();
@@ -2182,6 +2197,7 @@ document.getElementById("sale-form").addEventListener("submit", async function(e
   const price = parseFloat(document.getElementById("sale-price").value);
   const wholesale = parseFloat(document.getElementById("sale-wholesale").value);
   const payment = state.paymentMethod;
+  const debtorName = payment === "unpaid" ? document.getElementById("sale-debtor-name").value.trim() : "";
 
   /* --- validation --- */
   if(!name){ showToast(t("err_product_required"), "error"); document.getElementById("sale-product").focus(); return; }
@@ -2200,13 +2216,13 @@ document.getElementById("sale-form").addEventListener("submit", async function(e
     if(editId){
       const sale = state.sales.find(s => s.id === editId);
       if(!sale){ resetSaleForm(); return; }
-      const res = await apiPut("/sales/" + editId, { product: name, qty, price, wholesale, payment });
+      const res = await apiPut("/sales/" + editId, { product: name, qty, price, wholesale, payment, debtorName });
       Object.assign(sale, res.sale);
       saved = sale;
       showToast(t("sale_updated"));
     } else {
       if(!targetDayId){ showToast(t("err_no_day"), "error"); return; }
-      const res = await apiPost("/sales", { product: name, qty, price, wholesale, payment, dayId: targetDayId });
+      const res = await apiPost("/sales", { product: name, qty, price, wholesale, payment, debtorName, dayId: targetDayId });
       state.sales.unshift(res.sale);
       saved = res.sale;
       showToast(t("sale_added"));
@@ -2236,6 +2252,7 @@ function editSale(id){
   document.getElementById("sale-price").value = sale.price;
   document.getElementById("sale-wholesale").value = sale.wholesale || 0;
   document.getElementById("sale-edit-id").value = sale.id;
+  document.getElementById("sale-debtor-name").value = sale.debtorName || "";
   state.paymentMethod = sale.payment;
   renderPaymentChips();
   document.getElementById("sale-day-field").style.display = "none";
@@ -2428,6 +2445,7 @@ function renderSalesTable(){
       <td class="num"><span class="pill total">${fmt(s.total)}</span></td>
       <td class="num"><span class="pill ${(s.profit || 0) < 0 ? "loss" : "profit"}">${fmt(s.profit)}</span></td>
       <td><span class="pill ${escapeHtml(s.payment)}">${escapeHtml(paymentLabel(s.payment))}</span></td>
+      <td>${s.payment === "unpaid" && s.debtorName ? escapeHtml(s.debtorName) : "—"}</td>
       <td class="num">${formatDate(s.date)}</td>
       <td class="num">${formatTime(s.time)}</td>
       <td>${actions}</td>
@@ -2592,7 +2610,7 @@ function openReportDetail(id){
   const sales = salesOfSession(report.sessionId);
   const tbody = document.getElementById("report-detail-tbody");
   tbody.innerHTML = sales.length === 0
-    ? `<tr><td colspan="9" style="text-align:center; padding:24px; color:var(--text-muted);">${t("no_sales_yet")}</td></tr>`
+    ? `<tr><td colspan="10" style="text-align:center; padding:24px; color:var(--text-muted);">${t("no_sales_yet")}</td></tr>`
     : sales.map(s => `<tr>
         <td><span class="invoice-badge">${escapeHtml(s.invoice || "")}</span></td>
         <td>${escapeHtml(s.product)}</td>
@@ -2602,6 +2620,7 @@ function openReportDetail(id){
         <td class="num"><span class="pill total">${fmt(s.total)}</span></td>
         <td class="num"><span class="pill ${(s.profit || 0) < 0 ? "loss" : "profit"}">${fmt(s.profit)}</span></td>
         <td><span class="pill ${escapeHtml(s.payment)}">${escapeHtml(paymentLabel(s.payment))}</span></td>
+        <td>${s.payment === "unpaid" && s.debtorName ? escapeHtml(s.debtorName) : "—"}</td>
         <td class="num">${formatTime(s.time)}</td>
       </tr>`).join("");
 
