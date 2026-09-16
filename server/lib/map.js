@@ -6,19 +6,20 @@ const str = v => (v === null || v === undefined ? null : String(v));
 const iso = v => (v instanceof Date ? v.toISOString() : v);
 
 const mapSale = r => ({
-  id:        str(r.id),
-  invoice:   r.invoice_no,
-  product:   r.product_name,
-  qty:       r.quantity,
-  price:     Number(r.selling_price),
-  wholesale: Number(r.wholesale_price),
-  total:     Number(r.total),
-  cost:      Number(r.wholesale_total),
-  profit:    Number(r.profit),
-  payment:   r.payment_method,
-  sessionId: str(r.day_id),
-  date:      r.sale_date,
-  time:      iso(r.sale_time)
+  id:         str(r.id),
+  invoice:    r.invoice_no,
+  product:    r.product_name,
+  qty:        r.quantity,
+  price:      Number(r.selling_price),
+  wholesale:  Number(r.wholesale_price),
+  total:      Number(r.total),
+  cost:       Number(r.wholesale_total),
+  profit:     Number(r.profit),
+  payment:    r.payment_method,
+  debtorName: r.debtor_name || null,
+  sessionId:  str(r.day_id),
+  date:       r.sale_date,
+  time:       iso(r.sale_time)
 });
 
 const mapDay = r => ({
