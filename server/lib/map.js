@@ -1,26 +1,11 @@
 "use strict";
-/* Database rows -> the shapes the existing frontend already renders.
-   Keeping these names identical is what lets the UI code stay untouched. */
+/* Database rows -> the shapes the frontend renders.
+   الأسماء القديمة (mapSale/mapDay/...) محفوظة كما هي حتى تبقى
+   أجزاء الواجهة القائمة تعمل، والمحولات الجديدة تخدم أقسام v4. */
 
 const str = v => (v === null || v === undefined ? null : String(v));
 const iso = v => (v instanceof Date ? v.toISOString() : v);
-
-const mapSale = r => ({
-  id:         str(r.id),
-  invoice:    r.invoice_no,
-  product:    r.product_name,
-  qty:        r.quantity,
-  price:      Number(r.selling_price),
-  wholesale:  Number(r.wholesale_price),
-  total:      Number(r.total),
-  cost:       Number(r.wholesale_total),
-  profit:     Number(r.profit),
-  payment:    r.payment_method,
-  debtorName: r.debtor_name || null,
-  sessionId:  str(r.day_id),
-  date:       r.sale_date,
-  time:       iso(r.sale_time)
-});
+const n = v => Number(v === null || v === undefined ? 0 : v);
 
 const mapDay = r => ({
   id:        str(r.id),
@@ -39,37 +24,138 @@ const mapNote = r => ({
   time:      iso(r.note_time)
 });
 
-const mapTotals = r => ({
-  total:  Number(r.total  || 0),
-  cost:   Number(r.cost   || 0),
-  profit: Number(r.profit || 0),
-  count:  Number(r.count  || 0),
-  cash:   Number(r.cash   || 0),
-  card:   Number(r.card   || 0),
-  byMethod: r.by_method || {}
+/* ───────────── v4: الفواتير ───────────── */
+const mapInvoiceItem = r => ({
+  id:        str(r.id),
+  productId: str(r.product_id),
+  product:   r.product_name,
+  qty:       n(r.qty),
+  qtyReturned: n(r.qty_returned),
+  wholesale: n(r.wholesale_price),
+  price:     n(r.selling_price),
+  total:     n(r.line_total),
+  cost:      n(r.line_cost),
+  unitId:    str(r.unit_id),
+  imei:      r.imei || null,
+  isPhone:   !!r.unit_id || !!r.imei
 });
 
-/* a closed day + its totals is what the Reports screen calls a "report" */
-const mapReport = r => ({
-  id:        "rep-" + str(r.id),
-  sessionId: str(r.id),
-  dayName:   r.day_name,
-  date:      r.day_date,
-  closedAt:  iso(r.closed_at),
-  totals:    mapTotals(r)
+const mapInvoice = (r, items) => {
+  const refunded = n(r.refunded);
+  const refundedProfit = n(r.refunded_profit);
+  return {
+    id:         str(r.id),
+    invoice:    r.invoice_no,
+    sessionId:  str(r.day_id),
+    date:       r.sale_date,
+    time:       iso(r.sale_time),
+    payment:    r.payment_method,
+    debtorName: r.debtor_name || null,
+    discount:   n(r.discount),
+    subtotal:   n(r.subtotal),
+    cost:       n(r.cost_total),
+    total:      n(r.total),
+    profit:     n(r.profit),
+    refunded,
+    refundedProfit,
+    effTotal:   n(r.total) - refunded,
+    effCost:    n(r.cost_total) - (refunded - refundedProfit),
+    effProfit:  n(r.profit) - refundedProfit,
+    status:     r.status,
+    notes:      r.notes || null,
+    items:      (items || []).map(mapInvoiceItem)
+  };
+};
+
+/* سطر مبسّط للعمليات الأخيرة في لوحة التحكم */
+const mapInvoiceLite = r => ({
+  id: str(r.id), invoice: r.invoice_no, date: r.sale_date, time: iso(r.sale_time),
+  payment: r.payment_method, total: n(r.total) - n(r.refunded),
+  profit: n(r.profit) - n(r.refunded_profit), status: r.status,
+  itemsCount: n(r.items_count), firstProduct: r.first_product || ""
 });
 
-/* One reusable aggregate over a LEFT JOIN of days -> sales.
-   Sales only: daily notes are never part of any total. */
-const TOTALS_SELECT = `
-  COALESCE(SUM(s.total), 0)                                          AS total,
-  COALESCE(SUM(s.wholesale_total), 0)                                AS cost,
-  COALESCE(SUM(s.profit), 0)                                         AS profit,
-  COUNT(s.id)                                                        AS count,
-  COALESCE(SUM(s.total) FILTER (WHERE s.payment_method = 'cash'), 0) AS cash,
-  COALESCE(SUM(s.total) FILTER (WHERE s.payment_method = 'card'), 0) AS card,
-  (SELECT COALESCE(jsonb_object_agg(x.pm, x.amt), '{}'::jsonb)
-     FROM (SELECT payment_method AS pm, SUM(total) AS amt
-             FROM sales WHERE day_id = d.id GROUP BY 1) x)           AS by_method`;
+const mapReturn = r => ({
+  id: str(r.id), invoiceId: str(r.invoice_id), itemId: str(r.item_id),
+  dayId: str(r.day_id), qty: n(r.qty), amount: n(r.amount),
+  profitAdjust: n(r.profit_adjust), reason: r.reason || null,
+  time: iso(r.returned_at)
+});
 
-module.exports = { mapSale, mapDay, mapNote, mapTotals, mapReport, TOTALS_SELECT };
+/* ───────────── v4: المخزون ───────────── */
+const mapProduct = r => ({
+  id:         str(r.id),
+  name:       r.name,
+  categoryId: str(r.category_id),
+  category:   r.category_name || null,
+  kind:       r.kind,
+  barcode:    r.barcode || null,
+  image:      r.image_url || null,
+  model:      r.model || null,
+  color:      r.color || null,
+  storage:    r.storage || null,
+  qty:        n(r.quantity),
+  purchasePrice: n(r.purchase_price),
+  salePrice:  n(r.sale_price),
+  minStock:   n(r.min_stock),
+  active:     !!r.is_active,
+  lowStock:   r.is_active && n(r.quantity) <= n(r.min_stock),
+  stockValue: n(r.quantity) * n(r.purchase_price),
+  createdAt:  iso(r.created_at),
+  updatedAt:  iso(r.updated_at)
+});
+
+const mapCategory = r => ({ id: str(r.id), name: r.name, sortOrder: n(r.sort_order) });
+
+const mapUnit = r => ({
+  id: str(r.id), productId: str(r.product_id),
+  imei: r.imei || null, serial: r.serial || null,
+  status: r.status, invoiceItemId: str(r.invoice_item_id),
+  createdAt: iso(r.created_at)
+});
+
+const mapStockMove = r => ({
+  id: str(r.id), productId: str(r.product_id), product: r.product_name,
+  qtyIn: n(r.qty_in), qtyOut: n(r.qty_out), reason: r.reason,
+  refType: r.ref_type, refId: str(r.ref_id), note: r.note || null,
+  dayId: str(r.day_id), time: iso(r.moved_at)
+});
+
+const mapStocktake = r => ({
+  id: str(r.id), dayId: str(r.day_id), note: r.note || null,
+  lines: n(r.lines), diffLines: n(r.diff_lines), time: iso(r.created_at)
+});
+
+/* ───────────── v4: المشتريات والمصروفات والصندوق ───────────── */
+const mapPurchaseItem = r => ({
+  id: str(r.id), productId: str(r.product_id), product: r.product_name,
+  qty: n(r.qty), unitCost: n(r.unit_cost), total: n(r.line_total),
+  imeis: r.imeis || []
+});
+
+const mapPurchase = (r, items) => ({
+  id: str(r.id), purchaseNo: r.purchase_no, sessionId: str(r.day_id),
+  date: r.purchase_date, total: n(r.total), paid: !!r.paid,
+  notes: r.notes || null, status: r.status,
+  itemsCount: n(r.items_count), time: iso(r.created_at),
+  items: (items || []).map(mapPurchaseItem)
+});
+
+const mapExpense = r => ({
+  id: str(r.id), sessionId: str(r.day_id), category: r.category,
+  amount: n(r.amount), date: r.expense_date, notes: r.notes || null,
+  time: iso(r.created_at)
+});
+
+const mapCashMove = r => ({
+  id: str(r.id), dayId: str(r.day_id), direction: r.direction,
+  method: r.method, category: r.category, amount: n(r.amount),
+  description: r.description || null, time: iso(r.moved_at)
+});
+
+module.exports = {
+  mapDay, mapNote,
+  mapInvoice, mapInvoiceItem, mapInvoiceLite, mapReturn,
+  mapProduct, mapCategory, mapUnit, mapStockMove, mapStocktake,
+  mapPurchase, mapPurchaseItem, mapExpense, mapCashMove
+};

@@ -1,140 +1,154 @@
-# Blue Mobile — Sales Ledger
+# Blue Mobile v4 — منظومة إدارة محل الهواتف والإكسسوارات
 
-A single-shop sales ledger: **Frontend → Backend API → PostgreSQL**, with **exactly one account**.
+نظام متكامل لإدارة محل موبايلات: **فواتير بيع ومرتجعات · مخزون بهواتف تتتبع برقم IMEI ·
+مشتريات بمتوسط تكلفة مرجّح · مصروفات · صندوق نقدي · تقارير وأرباح وخسائر · إغلاق يومية مجمّدة**.
 
-Everything that matters (sales, product names, daily notes, day open/closed status,
-summaries, profit, settings) lives in PostgreSQL. Two phones signed into the same
-account see identical data. The browser stores nothing but a session token and a
-tiny UI cache.
+**Frontend → Backend API → PostgreSQL**، بحساب واحد فقط. كل شيء يُحفظ في قاعدة البيانات —
+جهازان يدخلان نفس الحساب يريان نفس البيانات لحظيًا. المتصفح لا يحتفظ إلا برمز الجلسة
+وتفضيلات الواجهة.
 
 ---
 
-## 1. Architecture
+## 1. المعمارية
 
 ```
-Blue-Mobile.html      one-file frontend (Glass UI, Arabic-first, RTL/LTR, dark/light)
-        │  fetch() + Bearer/cookie session
+Blue-Mobile.html      واجهة كاملة في ملف واحد (Glass UI · عربية RTL · داكن/فاتح)
+        │  fetch() + جلسة Bearer/cookie
         ▼
-server/index.js       Express API  (also serves the HTML and acts as SPA fallback)
+server/index.js       Express API (يقدّم الواجهة أيضًا)
         │  pg Pool
         ▼
-PostgreSQL            single database — all ledger data
+PostgreSQL            قاعدة واحدة — كل بيانات المنظومة (22 جدولًا)
 ```
 
-| Path | What it is |
+| المسار | الوظيفة |
 |---|---|
-| `Blue-Mobile.html` | the whole frontend, no build step |
-| `server/index.js` | app wiring, security headers/CSP, auth gate, error handler |
-| `server/config.js` | reads the environment, no hard-coded secrets |
-| `server/db.js` | `pg` pool, `query()` and `tx()` helpers |
-| `server/migrate.js` | migration runner (tracked in `schema_migrations`) |
-| `server/migrations/001_init.sql` | the schema |
-| `server/middleware/auth.js` | session cookie + `Authorization: Bearer` fallback |
-| `server/routes/` | `auth, days, sales, products, notes, data` |
-| `server/lib/` | `http` (errors/validation), `names` (autocomplete ranking), `map` (row → API shape) |
-| `tests/api.test.js` | 89 backend assertions |
-| `tests/e2e.test.js` | 42 assertions in two real browsers = two phones |
-| `tests/screens.js` | screenshot pass → `screens/` |
+| `Blue-Mobile.html` | الواجهة كاملة بدون خطوة بناء |
+| `server/index.js` | تجميع التطبيق، ترويسات الأمان، بوابة المصادقة، معالج الأخطاء |
+| `server/config.js` | قراءة البيئة — لا أسرار في المصدر |
+| `server/db.js` | `pg` Pool + `query()`/`tx()` |
+| `server/migrate.js` | مشغّل المهاجرات (متابَع في `schema_migrations`) |
+| `server/lib/ledger.js` | منطق الدفتر: إجماليات اليوم، حركة الصندوق والمخزون، لقطة الإغلاق |
+| `server/lib/map.js` | تحويل صفوف القاعدة إلى أشكال الواجهة |
+| `server/routes/` | auth · sales · inventory · purchases · expenses · cashbox · days · reports · notes · data |
 
-## 2. Setup
+## 2. التشغيل
 
 ```bash
-cp .env.example .env      # then edit it — DATABASE_URL and SESSION_SECRET are required
+cp .env.example .env    # عدّل DATABASE_URL و SESSION_SECRET (مطلوبان)
 npm install
-npm run migrate           # creates/updates the schema, safe to re-run
-npm start                 # http://localhost:3000
+npm run migrate         # ينشئ/يحدّث المخطط — آمن للإعادة
+npm run dev             # Postgres + المهاجرات + خادم بإعادة تشغيل تلقائية
+# أو: npm start          # http://localhost:3000
 ```
 
-Generate a real secret with:
+أوامر مساعدة:
+
+```bash
+npm run seed            # بيانات تجريبية واقعية (تمسح الحالية — الحساب يبقى)
+npm run wipe            # تصفير كل البيانات (WIPE_PASS=... لتحديد كلمة المرور)
+npm test                # 110 فحص API
+npm run test:e2e        # 42 فحص متصفح حقيقي (يحتاج Playwright)
+npm run screens         # لقطات شاشة لكل الصفحات → screens/
+```
+
+أنشئ سرًا حقيقيًا للجلسات:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 ```
 
-`.env` is git-ignored; `.env.example` holds placeholders only. No secret, password,
-connection string or token is written in the source.
+**أول تشغيل:** تظهر شاشة *الإعداد الأول* وتطلب اسم مستخدم وبريدًا وكلمة مرور — هذا هو
+الحساب الوحيد. بعدها لا يظهر إلا تسجيل الدخول (`409 account_exists` لأي محاولة ثانية).
 
-**First run:** open the app and the *Initial Setup* screen asks for a username, an
-e-mail and a password — this creates the one and only account. From then on the
-app only ever shows *Sign in*: there is no sign-up link, and the API refuses a
-second account with `409 account_exists` (the `users` table also carries a
-`singleton` unique constraint, so a second row is impossible even from psql).
+## 3. الوحدات
 
-## 3. Database
+- **المبيعات** — فواتير `INV-xxxxx` متعددة الأصناف: منتجات مخزون أو أصناف حرة، خصم،
+  طرق دفع (نقد/بطاقة/غير خالص باسم المدين)، هواتف تُباع **باختيار وحدة IMEI محددة**.
+  تعديل وإلغاء وإرجاع كلي أو جزئي — كلها تُسوّي المخزون والصندوق تلقائيًا. طباعة فاتورة A4.
+- **المخزون** — منتجات (هاتف/إكسسوار)، تصنيفات، باركود، صور، وحدات IMEI وحالتها
+  (موجود/مبيع/مُرجع)، سجل حركة كامل (شراء/بيع/مرتجع/تسوية)، **جرد** بفروقات تُطبَّق بنقرة،
+  بحث فوري بالاسم/الباركود/IMEI.
+- **المشتريات** — فواتير `PUR-xxxxx`، أصناف موجودة أو **إنشاء منتج جديد inline**،
+  تسجيل IMEIs للتوريد، متوسط تكلفة مرجّح، مدفوعة (تُخصم من الصندوق) أو آجلة.
+- **المصروفات** — أنواع ثابتة (إيجار/كهرباء/إنترنت/نقل/صيانة/أخرى) مربوطة بالصندوق واليوم.
+- **الصندوق** — رصيد نقدي مباشر = مقبوضات − مدفوعات، إيداع/سحب يدوي، سجل حركة مصنّف،
+  ورقة اليومية بإجمالياتها.
+- **التقارير** — أيام مغلقة بلقطة **مجمّدة** عند الإغلاق (لا تتغير أبدًا)، تقرير مبيعات
+  (باليوم/المنتج/طريقة الدفع)، أرباح وخسائر، تقرير مخزون (القيمة/النواقص/الأكثر مبيعًا/الراكد).
+- **الإعدادات** — بيانات المحل والشعار (تظهر في الفواتير)، العملة، الحد الأدنى الافتراضي،
+  تفعيل طرق الدفع، نسخ احتياطي/استرجاع JSON، مظهر داكن/فاتح، **وضع البيع السريع بالباركود**.
+- **البيع السريع بالباركود (v4.1)** — قارئ باركود USB/Bluetooth (Keyboard Wedge) يعمل من
+  أي صفحة دون فتح المبيعات أو الضغط على زر. مسح باركود يفتح صفحة المبيعات تلقائيًا،
+  يضيف المنتج للفاتورة الجارية (أو يزيد كميته إن كان مضافًا)، ويحسب الربح والإجمالي فورًا.
+  باركود غير مسجَّل → نافذة "المنتج غير موجود" (إضافة/بحث يدوي/إلغاء). منتج مخزونه صفر →
+  تنبيه واضح دون منع الإضافة اليدوية اللاحقة (السلوك الأصلي لمنع بيع مخزون سالب محفوظ كما هو).
+  يمكن تعطيله بالكامل من الإعدادات. البيع اليدوي (بحث بالاسم) يعمل جنبًا إلى جنب دون أي تغيير.
+- **تسجيل دفعات باركود جديدة (v4.2)** — وضع مستقل تمامًا عن وضع البيع (له الأولوية دائمًا
+  عند تفعيله معًا لمنع أي التباس). يجمع مسح عدة باركودات متتابعة في "دفعة" مؤقتة (شريط عائم
+  يعرض العدّاد فوق كل الصفحات). داخل نافذة إكمال الدفعة، لكل باركود سعر جملة/بيع **مستقل
+  قابل للتعديل فرديًا** (يرث تلقائيًا سعر آخر باركود أُضيف توفيرًا للوقت عند تكرار نفس السعر)،
+  مع زر "تطبيق على كل الباركودات" لتعبئة سعر واحد للكل بضغطة زر ثم تعديل أي باركود استثنائي
+  بعدها. تُربط كل الباركودات باسم منتج رئيسي واحد — جديد أو إضافة لموجود بنفس الاسم بالضبط —
+  وكمية إجمالية واحدة تُضاف لرصيد المنتج. عند البيع لاحقًا، كل باركود يستخدم سعره الخاص
+  تلقائيًا حتى لو كانت كلها تحت نفس اسم المنتج. يمنع تسجيل أي باركود مكرر (من دفعة سابقة أو
+  من نفس الدفعة الحالية) مع تنبيه واضح.
 
-| Table | Purpose |
+## 4. قاعدة البيانات (مختصر)
+
+`users · sessions · settings · payment_methods · categories · products · phone_units ·
+invoices · invoice_items · sale_returns · purchases · purchase_items · expenses ·
+cash_movements · stock_movements · stocktakes · stocktake_items · days · day_summaries ·
+notes · product_names`
+
+- الفواتير والأصناف تحمل أعمدة `GENERATED ALWAYS` للإجماليات — الحساب لا ينحرف عن الواجهة.
+- **قواعد لا تُخترق:** رقم IMEI فريد (وحدة لكل جهاز) · وحدة الهاتف تُبيع مرة واحدة ·
+  الكمية لا تنزل تحت الصفر · الخصم لا يتجاوز الإجمالي · يوم واحد لكل تاريخ · يوم مفتوح واحد.
+- إلغاء/حذف عملية **يعكس** كل آثارها (مخزون + صندوق)؛ الإغلاق يخزّن لقطة JSON في
+  `day_summaries` تبقى صحيحة حتى لو حُذفت العمليات لاحقًا.
+- متوسط التكلفة مرجّح: `الكمية القديمة × سعرها + الجديدة × سعرها ÷ الإجمالي`.
+
+## 5. الـ API
+
+كل المسارات تحت `/api` وما عدا `/api/auth/*` و`/api/health` تتطلب جلسة (401 بدونها).
+
+| المجموعة | المسارات |
 |---|---|
-| `users` | the single account: `username`, `email`, `password_hash` (bcrypt), `singleton BOOLEAN UNIQUE CHECK (singleton)` |
-| `sessions` | login sessions: SHA-256/HMAC of the token, `expires_at`, `user_agent` |
-| `settings` | account-wide `lang` (default `ar`) and `theme` |
-| `payment_methods` | seeded `cash`, `card` — sales reference it, so a third method is one INSERT away |
-| `days` | one row per business day: `day_date UNIQUE`, `status open\|closed`, `closed_at`; a partial unique index allows only one open day |
-| `product_names` | autocomplete dictionary: `name`, `normalized_name UNIQUE`, `usage_count` — **names only, not inventory** |
-| `sales` | `invoice_no`, `product_name`, `quantity`, `wholesale_price`, `selling_price`, `payment_method`, `sale_date`, `sale_time`, `created_at` and **generated** `total`, `wholesale_total`, `profit` |
-| `notes` | daily notes: `note_text`, `note_date`, `note_time`, `created_at` — never part of any total |
+| المصادقة | `GET auth/status` · `POST auth/setup|login|logout|password` |
+| الأيام | `GET days` · `GET days/current` · `POST days` · `GET days/:id` · `POST days/:id/close` · `DELETE days/:id` |
+| المبيعات | `GET sales` · `POST sales` · `PUT sales/:id` · `DELETE sales/:id` · `POST sales/:id/cancel` · `POST sales/:id/returns` |
+| المخزون | `GET|POST inventory/products` · `PUT|DELETE inventory/products/:id` · `POST inventory/products/:id/adjust` · `GET|POST inventory/products/:id/units` · `GET inventory/search` · `GET inventory/movements` · `POST|GET inventory/categories` · `POST|GET inventory/stocktakes` |
+| المشتريات | `GET|POST purchases` · `GET|PUT|DELETE purchases/:id` · `POST purchases/:id/cancel` |
+| المصروفات | `GET|POST expenses` · `PUT|DELETE expenses/:id` |
+| الصندوق | `GET cashbox` · `POST cashbox/deposit|withdraw` · `DELETE cashbox/movements/:id` |
+| التقارير | `GET reports/dashboard` · `GET reports/sales?from&to&group=day\|product\|method` · `GET reports/pnl` · `GET reports/inventory` |
+| الحساب | `GET bootstrap` · `GET|PUT settings` · `GET|PUT payment-methods` · `GET backup` · `POST backup/restore` · `POST import` · `DELETE data` |
 
-`total`, `wholesale_total` and `profit` are `GENERATED ALWAYS AS ... STORED`
-columns, so the arithmetic cannot drift from what the UI shows: 2 × 15/20 gives
-40 / 30 / 10 in the database itself. Nothing is deducted from stock — there is no
-stock.
+العمليات تُرفض على يوم مغلق (`409 day_closed`) وبدون يوم مفتوح (`409 no_open_day`)،
+والقراءة تعمل دائمًا — الإغلاق يقفل ولا يحذف.
 
-Migrations are additive and idempotent (`CREATE TABLE IF NOT EXISTS`, guarded
-`ALTER`s); `npm run migrate` records what it applied and drops nothing.
-
-## 4. API
-
-All routes are under `/api`. Everything except `/api/health` and `/api/auth/*`
-requires a valid session and answers `401 unauthenticated` without one.
-
-**Auth** — `GET /auth/status` · `POST /auth/setup` · `POST /auth/login` ·
-`POST /auth/logout` · `GET /auth/me` · `POST /auth/password`
-Passwords are bcrypt-hashed (cost from `BCRYPT_ROUNDS`), never stored or logged in
-clear. Login is rate-limited to 10 attempts per 15 minutes per IP+identifier
-(`429 too_many_attempts`) and compares against a dummy hash when the user is
-unknown, so a wrong username costs the same time as a wrong password.
-
-**Days** — `GET /days` (`?status=`) · `GET /days/current` · `POST /days` ·
-`GET /days/:id` · `POST /days/:id/close`
-**Sales** — `GET /sales` (`?date`, `?dayId`, `?q`, `?limit`) · `GET /sales/summary` ·
-`POST /sales` · `PUT /sales/:id` · `DELETE /sales/:id`
-**Products** — `GET /products?q=` (ranked suggestions) · `GET /products/all` · `POST /products`
-**Notes** — `GET /notes` (`?dayId`/`?date`) · `POST /notes` · `DELETE /notes/:id`
-**Account data** — `GET /bootstrap` · `GET|PUT /settings` · `POST /import` ·
-`DELETE /data` (needs `{"confirm":"DELETE"}`)
-
-Writes are refused on a closed day (`409 day_closed`) and when no day is open
-(`409 no_open_day`), while every read of a closed day keeps working — closing
-locks, it never deletes.
-
-## 5. Tests
+## 6. الاختبارات
 
 ```bash
-npm run test:api     # 89 assertions — server + database
-npm run test:e2e     # 42 assertions — two browser contexts, i.e. two phones
-npm test             # both
+npm test                    # 110 فحص — المنطق الكامل عبر الـ API
+npm run test:e2e            # 42 فحص — متصفح كروميوم حقيقي على الواجهة
+NODE_PATH=/tmp/bmtest/node_modules npm run test:e2e   # إذا كان playwright مثبتًا خارج المشروع
 ```
 
-`test:e2e` needs Playwright + Chromium (`npm i -D playwright && npx playwright install chromium`).
-Both suites create the account if it is missing and reset the ledger through the
-API before running, so they are safe to repeat.
+تغطية الـ API: المصادقة والحماية · أيام العمل وتضاربها · منتجات ووحدات IMEI
+(التكرار/قفل النوع/البحث) · مشتريات بمتوسط مرجّح ومنتجات inline · فواتير بكل حالاتها
+(خصم/وحدات/تعديل/إرجاع/إلغاء/حذف) · مصروفات · صندوق ورصيده · جرد وتسويات · تقارير ·
+نسخ احتياطي/استرجاع كامل الدورة · شكل bootstrap.
 
-What they cover: setup-once and second-account rejection · login, logout, invalid
-credentials, session survival across reloads · 401 on every sales/products/notes/
-summary/day route while signed out · sale creation, persistence and arithmetic ·
-autocomplete narrowing per character, including from a second session · multiple
-notes per day and their absence from every total · closing a day, the lock, and
-the day staying viewable · and a full two-device simulation where phone B logs
-into the same account and sees phone A's sale, suggestion, note, day status and
-totals — then phone A picks up phone B's work after a reload.
+تغطية المتصفح: الدخول ورسائل الخطأ · بدء اليوم · إضافة إكسسوار وهاتف IMEI · درج المنتج ·
+بيع ببحث المنتج والتعبئة التلقائية واختيار IMEI · بيع بطاقة بخصم · شراء · مصروف · إيداع ·
+التقارير الأربعة · إغلاق اليومية · الإعدادات والمظهر — مع التأكد من **صفر أخطاء JavaScript**.
 
-## 6. Notes for operators
+## 7. ملاحظات تشغيلية
 
-- Reset to a fresh first-run setup (removes the account and everything it owns):
-  `psql "$DATABASE_URL" -c "TRUNCATE users CASCADE;"`
-- Wipe the ledger but keep the account: the *Delete all data* button in Settings,
-  or `DELETE /api/data` with `{"confirm":"DELETE"}`.
-- Sessions last `SESSION_TTL_DAYS` days; *Sign out* deletes the server-side
-  session, so a stolen token dies with it.
-- The frontend keeps only `bm_token` (session token) and `bm_ui` (last language and
-  theme, for a flash-free first paint) in `localStorage`. No sale, product, note,
-  day or total is ever written to the device.
+- تصفير البيانات مع إبقاء الحساب: زر *حذف جميع البيانات* في الإعدادات، أو
+  `DELETE /api/data` مع `{"confirm":"DELETE"}`، أو `npm run wipe`.
+- إعادة ضبط كاملة (يمسح الحساب أيضًا): `psql "$DATABASE_URL" -c "TRUNCATE users CASCADE;"`
+- النسخ الاحتياطي JSON يشمل كل الجداول — الاسترجاع يعتملي داخل معاملة واحدة.
+- الجلسات تدوم `SESSION_TTL_DAYS` يومًا؛ *تسجيل الخروج* يحذف جلسة السيرفر فيموت التوكن المسروق معها.
+- المتصفح يحتفظ فقط بـ `bm_token` و`bm_ui` في `localStorage` — لا بيانات عمل تُكتب على الجهاز.

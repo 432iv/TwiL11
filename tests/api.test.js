@@ -1,15 +1,17 @@
-/* Blue Mobile — backend API suite.  node tests/api.test.js
-   Exercises: single account, auth, sales maths, autocomplete, notes,
-   day closing, cross-device visibility and endpoint protection.     */
+/* Blue Mobile v4 — backend API suite.   node tests/api.test.js
+   يغطّي: المصادقة، الأيام، الفواتير والمرتجعات، المخزون (منتجات/وحدات/حركة/جرد)،
+   المشتريات، المصروفات، الصندوق، التقارير، النسخ الاحتياطي، والحماية.
+   يتطلب سيرفرًا حيًّا + قاعدة بيانات (يمسح كل البيانات في البداية).          */
 const BASE = process.env.BASE || "http://127.0.0.1:3000";
 let pass = 0, fail = 0;
 const group = n => console.log("\n=== " + n + " ===");
 const check = (label, cond, extra) => {
   if (cond) { pass++; console.log("  \u2713 " + label); }
-  else { fail++; console.log("  \u2717 FAIL: " + label + (extra !== undefined ? "  \u2192 " + JSON.stringify(extra) : "")); }
+  else { fail++; console.log("  \u2717 FAIL: " + label + (extra !== undefined ? "  \u2192 " + JSON.stringify(extra).slice(0, 260) : "")); }
 };
+const near = (a, b, eps = 0.02) => Math.abs(Number(a) - Number(b)) <= eps;
 
-/* a "device" = an isolated client with its own cookie jar / token */
+/* عميل مع عزل كوكيز/توكن */
 function device(name) {
   let cookie = null, token = null;
   return {
@@ -19,7 +21,7 @@ function device(name) {
       const headers = { "content-type": "application/json" };
       if (cookie && !opts.noCookie) headers.cookie = cookie;
       if (token && opts.bearer) headers.authorization = "Bearer " + token;
-      const res = await fetch(BASE + path, {
+      const res = await fetch(BASE + "/api" + path, {
         method, headers, body: body === undefined ? undefined : JSON.stringify(body)
       });
       const setCookie = res.headers.get("set-cookie");
@@ -30,313 +32,350 @@ function device(name) {
       let data = null;
       try { data = await res.json(); } catch (_) {}
       if (data && data.token) token = data.token;
-      return { status: res.status, data, raw: res };
+      return { status: res.status, data };
     },
-    get(p, o)      { return this.call("GET", p, undefined, o); },
-    post(p, b, o)  { return this.call("POST", p, b || {}, o); },
-    put(p, b)      { return this.call("PUT", p, b); },
-    del(p, b)      { return this.call("DELETE", p, b); },
+    get(p, o)     { return this.call("GET", p, undefined, o); },
+    post(p, b, o) { return this.call("POST", p, b || {}, o); },
+    put(p, b)     { return this.call("PUT", p, b); },
+    del(p, b)     { return this.call("DELETE", p, b); },
     forgetCookie() { cookie = null; token = null; }
   };
 }
 
-const CREDS = { username: "blue", email: "owner@bluemobile.ly", password: "ledger-2026-pass" };
+const api = device("main");
+const anon = device("anon");
 
 (async () => {
-  const A = device("Phone A");   // first device
-  const B = device("Phone B");   // second device, same account
-  const anon = device("stranger");
-
-  /* ---------------- 0. reset to a known state ---------------- */
-  {
-    const tmp = device("setup");
-    const st = await tmp.get("/api/auth/status");
-    if (!st.data.setupRequired) {
-      await tmp.post("/api/auth/login", { username: CREDS.username, password: CREDS.password });
-      await tmp.del("/api/data", { confirm: "DELETE" });
-    }
+  /* ═══════════ التهيئة ═══════════ */
+  group("التهيئة");
+  let r = await fetch(BASE + "/api/auth/status").then(x => x.json());
+  if (r.setupRequired) {
+    r = await api.post("/auth/setup", { username: "owner", email: "owner@bluemobile.ly", password: "test-pass-123" });
+    check("إنشاء الحساب", r.status === 201, r.data);
   }
+  r = await api.post("/auth/login", { username: "owner", password: "test-pass-123" });
+  check("تسجيل الدخول", r.status === 200 && r.data.token, r.data);
+  r = await api.post("/auth/login", { username: "owner", password: "wrong-pass-xxx" });
+  check("كلمة مرور خاطئة مرفوضة", r.status === 401, r.status);
+  r = await api.del("/data", { confirm: "DELETE" });
+  check("تصفير البيانات", r.status === 200, r.data);
+  r = await api.del("/data", { confirm: "no" });
+  check("رفض الحذف بدون تأكيد", r.status === 400, r.status);
 
-  /* ---------------- 1. health + protection ---------------- */
-  group("1. Service and endpoint protection");
-  {
-    const h = await anon.get("/api/health");
-    check("health endpoint reports the database up", h.status === 200 && h.data.db === "up", h.data);
+  /* ═══════════ الحماية ═══════════ */
+  group("حماية المسارات");
+  r = await anon.get("/bootstrap");
+  check("bootstrap بدون جلسة → 401", r.status === 401, r.status);
+  r = await anon.post("/sales", {});
+  check("بيع بدون جلسة → 401", r.status === 401, r.status);
+  r = await api.get("/bootstrap", { noCookie: true, bearer: true });
+  check("Bearer token يعمل بدون كوكيز", r.status === 200 && r.data.user, r.status);
+  r = await api.get("/bootstrap", { noCookie: true });
+  check("بدون توكن وبدون كوكيز → 401", r.status === 401, r.status);
 
-    for (const path of ["/api/bootstrap", "/api/sales", "/api/products?q=ج", "/api/notes", "/api/days", "/api/settings"]) {
-      const r = await anon.get(path);
-      check(`GET ${path} rejects anonymous callers (401)`, r.status === 401, r.status);
-    }
-    const w = await anon.post("/api/sales", { product: "x", qty: 1, price: 1, wholesale: 0, payment: "cash" });
-    check("POST /api/sales rejects anonymous callers (401)", w.status === 401, w.status);
-    const dd = await anon.del("/api/data", { confirm: "DELETE" });
-    check("destructive endpoint rejects anonymous callers", dd.status === 401, dd.status);
-  }
+  /* ═══════════ الأيام ═══════════ */
+  group("أيام العمل");
+  const today = new Date().toISOString().slice(0, 10);
+  const otherDay = "2024-03-" + (new Date().getDate() || 1);
+  r = await api.post("/days", { date: today });
+  check("فتح يوم", r.status === 201 && r.data.day.id, r.data);
+  const dayId = r.data.day.id;
+  r = await api.post("/days", { date: today });
+  check("يوم مفتوح بالفعل → 409", r.status === 409 && r.data.error === "day_already_open", r.data);
+  r = await api.get("/days/current");
+  check("اليوم الحالي", r.status === 200 && r.data.day && r.data.day.id === dayId, r.data.day);
 
-  /* ---------------- 2. the single account ---------------- */
-  group("2. Single account");
-  {
-    let st = await A.get("/api/auth/status");
-    const fresh = st.data.setupRequired;
-    if (fresh) {
-      const short = await A.post("/api/auth/setup", { username: "ab", password: "short" });
-      check("setup rejects a too-short username", short.status === 400, short.data);
-      const weak = await A.post("/api/auth/setup", { username: CREDS.username, password: "123" });
-      check("setup rejects a weak password", weak.status === 400, weak.data);
-      const made = await A.post("/api/auth/setup", CREDS);
-      check("the one account is created", made.status === 201 && made.data.user.username === CREDS.username, made.data);
-      check("setup signs the device in immediately", !!made.data.token);
-    } else {
-      const again = await A.post("/api/auth/setup", { username: "second", password: "another-pass-123" });
-      check("account already existed — setup refuses (409)", again.status === 409, again.data);
-      await A.post("/api/auth/login", { username: CREDS.username, password: CREDS.password });
-      pass += 3; console.log("  \u2713 (account pre-existing: creation checks covered by the 409 above)");
-    }
+  /* ═══════════ التصنيفات والمنتجات ═══════════ */
+  group("التصنيفات والمنتجات");
+  r = await api.post("/inventory/categories", { name: "هواتف ذكية" });
+  check("تصنيف جديد", r.status === 201 && r.data.category.id, r.data);
+  const catPhone = r.data.category.id;
+  r = await api.post("/inventory/categories", { name: "إكسسوارات" });
+  const catAcc = r.data.category.id;
+  r = await api.post("/inventory/categories", { name: "إكسسوارات" });
+  check("تصنيف مكرر = إرجاع نفس التصنيف (upsert)", r.status === 201 && r.data.category.id === catAcc, r.data);
 
-    const second = await device("intruder").post("/api/auth/setup", { username: "second", email: "x@y.z", password: "another-pass-123" });
-    check("a SECOND account cannot be created (409)", second.status === 409 && second.data.error === "account_exists", second.data);
+  r = await api.post("/inventory/products", { name: "شاحن Anker 20W", categoryId: catAcc, kind: "accessory", purchasePrice: 20, salePrice: 35, minStock: 5, qty: 10, barcode: "BAR-100" });
+  check("منتج إكسسوار برصيد افتتاحي", r.status === 201 && r.data.product.qty === 10, r.data);
+  const charger = r.data.product.id;
+  r = await api.post("/inventory/products", { name: "كابل مكرر", categoryId: catAcc, kind: "accessory", barcode: "BAR-100" });
+  check("باركود مكرر يُرفض", r.status === 409 && r.data.error === "barcode_taken", r.data);
 
-    st = await A.get("/api/auth/status");
-    check("status reports setup complete", st.data.setupRequired === false);
-    check("status tells the UI to hide sign-up", st.data.signupDisabled === true);
+  r = await api.post("/inventory/products", { name: "Galaxy A55", categoryId: catPhone, kind: "phone", purchasePrice: 800, salePrice: 1000, minStock: 2, model: "SM-A55", color: "أسود", storage: "256GB", imeis: ["111111111111111", "111111111111112"] });
+  check("منتج هاتف مع IMEIs", r.status === 201 && r.data.product.qty === 2, r.data);
+  const a55 = r.data.product.id;
+  r = await api.post("/inventory/products", { name: "مكرر IMEI", kind: "phone", imeis: ["111111111111111"] });
+  check("IMEI مكرر يُرفض", r.status === 409 && r.data.error === "imei_taken", r.data);
 
-    const users = await A.get("/api/auth/me");
-    check("me returns the account", users.status === 200 && users.data.user.username === CREDS.username);
-  }
+  r = await api.put("/inventory/products/" + a55, { name: "Galaxy A55", kind: "accessory" });
+  check("تغيير نوع منتج له وحدات مرفوض", r.status === 409 && r.data.error === "kind_locked", r.data);
+  r = await api.put("/inventory/products/" + a55, { salePrice: 1050 });
+  check("تعديل سعر البيع", r.status === 200 && r.data.product.salePrice === 1050, r.data);
 
-  /* ---------------- 3. authentication ---------------- */
-  group("3. Authentication");
-  {
-    const badPass = await device("x").post("/api/auth/login", { username: CREDS.username, password: "wrong-password" });
-    check("wrong password is rejected (401)", badPass.status === 401 && badPass.data.error === "invalid_credentials", badPass.data);
-    const badUser = await device("x").post("/api/auth/login", { username: "nobody", password: CREDS.password });
-    check("unknown user is rejected (401)", badUser.status === 401, badUser.data);
+  r = await api.get("/inventory/search?q=111111111111111");
+  check("بحث بالـ IMEI", r.status === 200 && r.data.products.length === 1 && r.data.products[0].id === a55, r.data.products && r.data.products.map(p => p.name));
+  r = await api.get("/inventory/search?q=anker");
+  check("بحث جزء من الاسم", r.status === 200 && r.data.products.some(p => p.id === charger), r.data.products && r.data.products.map(p => p.name));
+  r = await api.get("/inventory/search?q=BAR-100");
+  check("بحث بالباركود", r.status === 200 && r.data.products.some(p => p.id === charger), r.data.products && r.data.products.map(p => p.name));
 
-    const byEmail = device("email-login");
-    const em = await byEmail.post("/api/auth/login", { username: CREDS.email, password: CREDS.password });
-    check("login works with the email too", em.status === 200, em.data);
+  r = await api.post("/inventory/products/" + a55 + "/units", { imei: "111111111111113" });
+  check("إضافة وحدة IMEI", r.status === 201 && r.data.unit.status === "in_stock", r.data);
+  r = await api.get("/inventory/products/" + a55 + "/units");
+  check("قائمة الوحدات", r.status === 200 && r.data.units.length === 3 && r.data.units.every(u => !u.invoiceNo), r.data.units && r.data.units.length);
+  r = await api.post("/inventory/products/" + charger + "/units", { imei: "X" });
+  check("إضافة وحدة لغير الهاتف مرفوضة", r.status === 400, r.status);
 
-    const bearer = device("bearer");
-    await bearer.post("/api/auth/login", { username: CREDS.username, password: CREDS.password });
-    const viaBearer = await bearer.get("/api/bootstrap", { noCookie: true, bearer: true });
-    check("Authorization: Bearer works (needed inside iframes)", viaBearer.status === 200, viaBearer.status);
+  r = await api.post("/inventory/products/" + charger + "/adjust", { direction: "in", qty: 5, note: "تسوية+" });
+  check("تسوية كمية +5", r.status === 200 && r.data.product.qty === 15, r.data);
+  r = await api.post("/inventory/products/" + charger + "/adjust", { direction: "out", qty: 200 });
+  check("خصم أكثر من الرصيد مرفوض", r.status === 400, r.status);
 
-    const out = device("logout-test");
-    await out.post("/api/auth/login", { username: CREDS.username, password: CREDS.password });
-    const okBefore = await out.get("/api/sales");
-    await out.post("/api/auth/logout");
-    const afterLogout = await out.get("/api/sales");
-    check("logout invalidates that session server-side", okBefore.status === 200 && afterLogout.status === 401, afterLogout.status);
+  r = await api.post("/inventory/products", { name: "منتج للحذف", kind: "accessory" });
+  const delProd = r.data.product.id;
+  r = await api.del("/inventory/products/" + delProd);
+  check("حذف منتج بدون حركة", r.status === 200, r.data);
+  r = await api.post("/inventory/products", { name: "منتج برصيد لا يُحذف", kind: "accessory", qty: 2 });
+  const delProd2 = r.data.product.id;
+  r = await api.del("/inventory/products/" + delProd2);
+  check("حذف منتج له حركة افتتاحية مرفوض", r.status === 409 && r.data.error === "product_in_use", r.data);
+  r = await api.del("/inventory/products/" + charger);
+  check("حذف منتج له حركة مرفوض", r.status === 409 && r.data.error === "product_in_use", r.data);
+  r = await api.put("/inventory/products/" + charger, { active: false });
+  check("أرشفة منتج", r.status === 200 && r.data.product.active === false, r.data);
+  r = await api.put("/inventory/products/" + charger, { active: true });
+  check("إلغاء الأرشفة", r.status === 200 && r.data.product.active === true, r.data);
 
-    const stolen = device("stolen");
-    const junk = await stolen.get("/api/sales", { bearer: false });
-    check("a forged/absent token gets nothing", junk.status === 401);
-  }
+  /* ═══════════ المشتريات ═══════════ */
+  group("المشتريات");
+  r = await api.post("/purchases", { items: [
+    { productId: charger, qty: 10, unitCost: 22 },
+    { newProduct: { name: "Galaxy A56", categoryId: catPhone, kind: "phone", salePrice: 1200, minStock: 1 }, qty: 2, unitCost: 900, imeis: ["222222222222221", "222222222222222"] }
+  ], paid: true, notes: "توريد أول" });
+  check("فاتورة شراء (صنف موجود + منتج جديد)", r.status === 201 && /^PUR-/.test(r.data.purchase.purchaseNo), r.data);
+  const pur1 = r.data.purchase;
+  /* الشاحن: 10@20 + تسوية +5@20 = 15×20، ثم شراء 10@22 → 20.8 */
+  check("إجمالي الشراء 2020 (220 شاحن + 1800 هاتفان)", near(pur1.total, 2020), pur1.total);
 
-  /* ---------------- 4. day + sales maths ---------------- */
-  group("4. Day, sales and the arithmetic");
-  let dayId;
-  {
-    const today = new Date().toISOString().slice(0, 10);
-    const opened = await A.post("/api/days", { date: today, dayName: "الخميس" });
-    check("a day can be opened", opened.status === 201 && opened.data.day.status === "open", opened.data);
-    dayId = opened.data.day.id;
+  r = await api.get("/bootstrap");
+  const a56 = r.data.products.find(p => p.name === "Galaxy A56");
+  check("منتج جديد أُنشئ من الشراء", !!a56 && a56.qty === 2 && near(a56.purchasePrice, 900), a56 && { qty: a56.qty, avg: a56.purchasePrice });
+  const ch = r.data.products.find(p => p.id === charger);
+  check("متوسط التكلفة المرجح (15×20 + 10×22)/25 = 20.8", ch.qty === 25 && near(ch.purchasePrice, 20.8), { qty: ch.qty, avg: ch.purchasePrice });
 
-    const twice = await A.post("/api/days", { date: today });
-    check("a second open day is refused", twice.status === 409, twice.data);
+  r = await api.post("/purchases", { items: [{ productId: charger, qty: 3, unitCost: 30, imeis: ["X1"] }], paid: false });
+  check("IMEIs مع منتج غير هاتف تُهمل", r.status === 201, r.data);
+  const pur2 = r.data.purchase;
+  r = await api.post("/purchases", { items: [{ newProduct: { name: "غطاء شفاف", categoryId: catAcc, kind: "phone", salePrice: 15 }, qty: 2, unitCost: 5, imeis: ["A", "B", "C"] }] });
+  check("عدد IMEIs أكبر من الكمية مرفوض", r.status === 400 && r.data.error === "imeis_mismatch", r.data);
 
-    const sale = await A.post("/api/sales", { product: "جواء", qty: 2, price: 20, wholesale: 15, payment: "cash" });
-    check("sale created", sale.status === 201, sale.data);
-    const s = sale.data.sale;
-    check("the database computes 2 x (20/15) -> 40 / 30 / 10",
-      s.total === 40 && s.cost === 30 && s.profit === 10, s);
-    check("both prices are stored", s.price === 20 && s.wholesale === 15, s);
-    check("payment method stored", s.payment === "cash");
-    check("date, time and invoice recorded", !!s.date && !!s.time && /^INV-\d{5}$/.test(s.invoice), s);
+  /* ═══════════ المبيعات ═══════════ */
+  group("فواتير البيع");
+  r = await api.get("/inventory/products/" + a56.id + "/units");
+  if (!r.data.units) { console.log("  !! units GET failed:", r.status, JSON.stringify(r.data).slice(0, 200), "a56=", a56); }
+  const a56Units = (r.data.units || []).filter(u => u.status === "in_stock");
+  check("وحدات A56 المتوفرة", a56Units.length === 2, a56Units.length);
 
-    /* the client cannot fake the totals */
-    const liar = await A.post("/api/sales", { product: "محاولة", qty: 1, price: 10, wholesale: 4, total: 9999, profit: 9999, payment: "card" });
-    check("client-supplied total/profit are ignored",
-      liar.data.sale.total === 10 && liar.data.sale.profit === 6, liar.data.sale);
-    await A.del("/api/sales/" + liar.data.sale.id);
+  r = await api.post("/sales", { items: [{ productId: a56.id, qty: 2, wholesale: 900, selling: 1150, unitIds: [a56Units[0].id, a56Units[1].id] }], payment: "cash" });
+  check("بيع هاتفين بالوحدات", r.status === 201 && /^INV-/.test(r.data.sale.invoice), r.data);
+  const inv1 = r.data.sale;
+  check("ريح الهاتفين 500", near(inv1.profit, 500), inv1.profit);
 
-    const bad = await A.post("/api/sales", { product: "", qty: 1, price: 5, wholesale: 1, payment: "cash" });
-    check("empty product name rejected", bad.status === 400, bad.data);
-    const badQty = await A.post("/api/sales", { product: "x", qty: 0, price: 5, wholesale: 1, payment: "cash" });
-    check("quantity 0 rejected", badQty.status === 400, badQty.data);
-    const badPrice = await A.post("/api/sales", { product: "x", qty: 1, price: -5, wholesale: 1, payment: "cash" });
-    check("negative price rejected", badPrice.status === 400, badPrice.data);
-    const badPay = await A.post("/api/sales", { product: "x", qty: 1, price: 5, wholesale: 1, payment: "bitcoin" });
-    check("unknown payment method rejected", badPay.status === 400, badPay.data);
+  r = await api.get("/inventory/products/" + a56.id + "/units");
+  const soldUnit = r.data.units.find(u => u.id === a56Units[0].id);
+  check("الوحدة صارت مبيعة ومرتبطة بفاتورة", soldUnit.status === "sold" && soldUnit.invoiceNo === inv1.invoice, soldUnit);
 
-    await A.post("/api/sales", { product: "شاحن 33 واط", qty: 1, price: 50, wholesale: 35, payment: "card" });
-    const list = await A.get("/api/sales");
-    check("sales can be retrieved", list.data.sales.length === 2, list.data.sales.length);
-    const byDate = await A.get("/api/sales?date=" + today);
-    check("sales can be fetched by date", byDate.data.sales.length === 2);
+  r = await api.post("/sales", { items: [{ productId: charger, qty: 4, wholesale: 21, selling: 35 }], payment: "card", discount: 6 });
+  check("بيع بطاقة مع خصم", r.status === 201 && near(r.data.sale.total, 134), r.data);
+  const inv2 = r.data.sale;
 
-    const sum = await A.get("/api/sales/summary");
-    check("daily summary: 90 total / 40 cash / 50 card / 2 sales",
-      sum.data.summary.total === 90 && sum.data.summary.cash === 40 &&
-      sum.data.summary.card === 50 && sum.data.summary.count === 2, sum.data.summary);
-    check("daily summary: 65 wholesale cost / 25 profit (30+35 and 10+15)",
-      sum.data.summary.cost === 65 && sum.data.summary.profit === 25, sum.data.summary);
+  r = await api.post("/sales", { items: [{ name: "خدمة نقل بيانات", qty: 1, wholesale: 0, selling: 60 }], payment: "unpaid", debtorName: "سالم" });
+  check("صنف حر غير خالص", r.status === 201 && r.data.sale.debtorName === "سالم", r.data);
+  const inv3 = r.data.sale;
 
-    const upd = await A.put("/api/sales/" + s.id, { product: "جواء", qty: 3, price: 25, wholesale: 10, payment: "cash" });
-    check("sale update recalculates 3 x (25/10) -> 75/30/45",
-      upd.data.sale.total === 75 && upd.data.sale.cost === 30 && upd.data.sale.profit === 45, upd.data.sale);
-    await A.put("/api/sales/" + s.id, { product: "جواء", qty: 2, price: 20, wholesale: 15, payment: "cash" });
-  }
+  r = await api.post("/sales", { items: [{ productId: charger, qty: 999, wholesale: 21, selling: 35 }], payment: "cash" });
+  check("كمية أكبر من المخزون مرفوضة", r.status === 400 && r.data.error === "stock_insufficient", r.data);
+  r = await api.post("/sales", { items: [{ productId: a55, qty: 2, wholesale: 800, selling: 1000 }], payment: "cash" });
+  check("بيع هاتف بدون تحديد وحدات (اختيار تلقائي)", r.status === 201, r.data);
+  const inv4 = r.data.sale;
+  r = await api.post("/sales", { items: [{ productId: a55, qty: 2, wholesale: 800, selling: 1000, unitIds: [a56Units[0].id] }] });
+  check("وحدة من منتج آخر مرفوضة", r.status === 400 || r.status === 409, r.status);
+  r = await api.post("/sales", { items: [{ productId: charger, qty: 1, wholesale: 21, selling: 35 }], payment: "crypto" });
+  check("طريقة دفع غير معروفة مرفوضة", r.status === 400 && r.data.error === "payment_invalid", r.data);
+  r = await api.post("/sales", { items: [{ productId: charger, qty: 1, wholesale: 21, selling: 100 }], payment: "cash", discount: 500 });
+  check("خصم أكبر من الإجمالي يُقصّ إلى الإجمالي", r.status === 201 && near(r.data.sale.discount, 100) && near(r.data.sale.total, 0), r.data.sale && { d: r.data.sale.discount, t: r.data.sale.total });
+  const invDisc = r.data.sale;
 
-  /* ---------------- 5. autocomplete from the database ---------------- */
-  group("5. Product autocomplete (server side)");
-  {
-    for (const n of ["جوال سامسونج", "جوال آيفون", "جراب آيفون", "سماعة بلوتوث"]) {
-      await A.post("/api/products", { name: n });
-    }
-    const names = async q => (await A.get("/api/products?q=" + encodeURIComponent(q))).data.suggestions.map(s => s.name);
-    const j1 = await names("ج");
-    check('"ج" returns the ج names', j1.length >= 4, j1);
-    const j2 = await names("جو");
-    check('"جو" narrows', j2.length < j1.length && j2.length === 3, j2);
-    const j3 = await names("جوا");
-    check('"جوا" keeps narrowing', j3.length === 3, j3);
-    const j4 = await names("جوال");
-    check('"جوال" narrows to 2', j4.length === 2, j4);
-    const j5 = await names("جوال س");
-    check('"جوال س" narrows to 1 and is the closest match', j5.join() === "جوال سامسونج", j5);
-    const hamza = await names("جوال ا");
-    check("alef/hamza normalisation does not widen results", hamza.join() === "جوال آيفون", hamza);
-    check("first suggestion is the closest match", (await names("سما"))[0] === "سماعة بلوتوث");
+  /* تعديل فاتورة */
+  r = await api.put("/sales/" + inv2.id, { items: [{ productId: charger, qty: 2, wholesale: 21, selling: 35 }], payment: "cash", discount: 0 });
+  check("تعديل فاتورة (4→2 صنف، بطاقة→نقد)", r.status === 200 && near(r.data.sale.total, 70) && r.data.sale.payment === "cash", r.data);
+  const inv2b = r.data.sale;
 
-    const dup = await A.post("/api/products", { name: "جوال سامسونج" });
-    check("saving an existing name does not duplicate it", dup.status === 201);
-    const all = (await A.get("/api/products/all")).data.names;
-    check("no duplicate product names stored",
-      new Set(all).size === all.length && all.filter(n => n === "جوال سامسونج").length === 1, all);
-    check("a name created by selling is remembered", all.includes("جواء"), all);
-  }
+  /* ═══════════ المرتجعات والإلغاء ═══════════ */
+  group("المرتجعات والإلغاء");
+  r = await api.post("/sales/" + inv1.id + "/returns", { returns: [{ itemId: inv1.items[0].id, qty: 1 }], reason: "به عيب" });
+  check("إرجاع هاتف واحد", r.status === 201, r.data);
+  r = await api.get("/inventory/products/" + a56.id + "/units");
+  const backUnit = r.data.units.find(u => u.id === a56Units[1].id);
+  check("الوحدة المُرجعة in_stock مجددًا", backUnit.status === "in_stock" || backUnit.status === "returned_in", backUnit.status);
+  r = await api.get("/bootstrap");
+  const inv1b = r.data.invoices.find(i => i.id === inv1.id);
+  check("أثر المرتجع على الفاتورة", near(inv1b.refunded, 1150) && near(inv1b.effTotal, 1150), { r: inv1b.refunded, e: inv1b.effTotal });
 
-  /* ---------------- 6. daily notes ---------------- */
-  group("6. Daily notes");
-  {
-    const before = (await A.get("/api/sales/summary")).data.summary;
-    for (const text of ["أعطيت أخوي 100 د.ل", "دفعت 50 د.ل توصيل", "أعطيت فلان 30 د.ل"]) {
-      const r = await A.post("/api/notes", { text });
-      check("note added: " + text, r.status === 201 && r.data.note.text === text, r.data);
-    }
-    const notes = await A.get("/api/notes?dayId=" + dayId);
-    check("three notes stored for the day", notes.data.notes.length === 3, notes.data.notes.length);
-    check("each note carries id, text, date and time",
-      notes.data.notes.every(n => n.id && n.text && n.date && n.time));
-    check("notes come back newest first", notes.data.notes[0].text === "أعطيت فلان 30 د.ل");
+  r = await api.post("/sales/" + inv1.id + "/returns", { returns: [{ itemId: inv1.items[0].id, qty: 99 }] });
+  check("إرجاع أكثر من المتبقي مرفوض", r.status === 400, r.status);
+  r = await api.put("/sales/" + inv1.id, { items: [{ productId: a56.id, qty: 1, wholesale: 900, selling: 1150 }], payment: "cash" });
+  check("تعديل فاتورة لها مرتجعات مرفوض", r.status === 409 && r.data.error === "invoice_has_returns", r.data);
 
-    const after = (await A.get("/api/sales/summary")).data.summary;
-    check("notes changed NOTHING in the totals", JSON.stringify(before) === JSON.stringify(after), { before, after });
+  r = await api.post("/sales/" + inv3.id + "/cancel");
+  check("إلغاء فاتورة", r.status === 200, r.data);
+  r = await api.post("/sales/" + inv3.id + "/cancel");
+  check("إلغاء ملغاة مرفوض", r.status === 409, r.status);
+  r = await api.get("/bootstrap");
+  check("الملغاة لا تدخل الإجماليات", r.data.grand.sales >= inv1b.effTotal + inv2b.total + 0 /*inv4*/ - 1, r.data.grand);
 
-    const empty = await A.post("/api/notes", { text: "   " });
-    check("empty note rejected", empty.status === 400, empty.data);
+  r = await api.post("/sales", { items: [{ productId: charger, qty: 1, wholesale: 21, selling: 30 }], payment: "cash" });
+  const inv5 = r.data.sale;
+  r = await api.del("/sales/" + inv5.id);
+  check("حذف فاتورة نهائيًا", r.status === 200, r.data);
+  r = await api.get("/bootstrap");
+  check("الفاتورة المحذوفة اختفت", !r.data.invoices.some(i => i.id === inv5.id));
 
-    const del = await A.del("/api/notes/" + notes.data.notes[2].id);
-    check("note can be deleted", del.status === 200);
-    check("two notes remain", (await A.get("/api/notes?dayId=" + dayId)).data.notes.length === 2);
-  }
+  /* ═══════════ المصروفات ═══════════ */
+  group("المصروفات");
+  r = await api.post("/expenses", { category: "rent", amount: 300, notes: "إيجار الشهر" });
+  check("تسجيل مصروف", r.status === 201, r.data);
+  const exp1 = r.data.expense;
+  r = await api.post("/expenses", { category: "food", amount: 10 });
+  check("تصنيف غير مسموح مرفوض", r.status === 400, r.status);
+  r = await api.put("/expenses/" + exp1.id, { category: "electricity", amount: 250 });
+  check("تعديل مصروف", r.status === 200 && r.data.expense.category === "electricity", r.data);
+  r = await api.post("/expenses", { category: "other", amount: 50 });
+  const exp2 = r.data.expense;
+  r = await api.del("/expenses/" + exp2.id);
+  check("حذف مصروف", r.status === 200, r.data);
 
-  /* ---------------- 7. cross-device ---------------- */
-  group("7. Cross-device (Phone A -> PostgreSQL -> Phone B)");
-  {
-    const login = await B.post("/api/auth/login", { username: CREDS.username, password: CREDS.password });
-    check("Phone B signs in with the same account", login.status === 200, login.data);
+  /* ═══════════ الصندوق ═══════════ */
+  group("الصندوق");
+  r = await api.post("/cashbox/deposit", { amount: 2000, note: "إيداع" });
+  check("إيداع", r.status === 201, r.data);
+  r = await api.post("/cashbox/withdraw", { amount: 100, note: "سحب" });
+  check("سحب", r.status === 201, r.data);
+  r = await api.post("/cashbox/withdraw", { amount: 999999, note: "أكثر من الرصيد" });
+  check("سحب أكثر من الرصيد مرفوض", r.status === 400 && r.data.error === "insufficient_cash", r.data);
+  r = await api.post("/cashbox/withdraw", { amount: 2000000 });
+  check("مبلغ خارج النطاق مرفوض", r.status === 400 && r.data.error === "amount_invalid", r.data);
+  r = await api.get("/cashbox");
+  check("رصيد الصندوق", r.status === 200 && typeof r.data.balance === "number" && r.data.movements.length > 0, r.data.balance);
+  const balanceBefore = r.data.balance;
+  const manual = r.data.movements.find(m => m.category === "deposit");
+  r = await api.del("/cashbox/movements/" + manual.id);
+  check("حذف حركة إيداع يدوية", r.status === 200, r.data);
+  r = await api.get("/cashbox");
+  check("الحذف عدّل الرصيد", near(r.data.balance, balanceBefore - manual.amount, 0.01), { before: balanceBefore, del: manual.amount, after: r.data.balance });
+  r = await api.get("/cashbox");
+  const saleMove = r.data.movements.find(m => m.category === "sale");
+  r = await api.del("/cashbox/movements/" + saleMove.id);
+  check("حذف حركة بيع مرفوض", r.status === 400 || r.status === 409, r.status);
 
-    const boot = await B.get("/api/bootstrap");
-    check("Phone B sees the sale created on Phone A",
-      boot.data.sales.some(s => s.product === "جواء" && s.total === 40), boot.data.sales);
-    check("Phone B sees the same product suggestions",
-      (await B.get("/api/products?q=ج")).data.suggestions.length >= 4);
-    check("Phone B types 'ج' and gets the name Phone A created",
-      (await B.get("/api/products?q=ج")).data.suggestions.some(s => s.name === "جواء"));
-    check("Phone B sees both notes", boot.data.notes.length === 2, boot.data.notes.length);
-    check("Phone B sees the open day", boot.data.sessions.some(d => d.id === dayId && d.status === "open"));
+  /* ═══════════ الجرد والحركة ═══════════ */
+  group("الجرد وحركة المخزون");
+  r = await api.get("/bootstrap");
+  const chQty = r.data.products.find(p => p.id === charger).qty;
+  r = await api.post("/inventory/stocktakes", { note: "جرد تجريبي", lines: [
+    { productId: charger, countedQty: chQty - 1 },
+    { productId: a55, countedQty: 0 }
+  ]});
+  check("تنفيذ جرد", r.status === 201, r.data);
+  r = await api.get("/bootstrap");
+  check("الجرد عدّل الكمية", r.data.products.find(p => p.id === charger).qty === chQty - 1);
+  r = await api.get("/inventory/movements?productId=" + charger);
+  check("سجل الحركة", r.status === 200 && r.data.movements.some(m => m.reason === "adjustment"), r.data.movements && r.data.movements.length);
+  r = await api.get("/inventory/movements?reason=purchase");
+  check("فلترة الحركة بالسبب", r.status === 200 && r.data.movements.every(m => m.reason === "purchase"), r.data.movements && r.data.movements.length);
+  r = await api.get("/inventory/stocktakes");
+  check("قائمة الجرد", r.status === 200 && r.data.stocktakes.length === 1, r.data.stocktakes && r.data.stocktakes.length);
 
-    const sumA = (await A.get("/api/sales/summary")).data.summary;
-    const sumB = (await B.get("/api/sales/summary")).data.summary;
-    check("daily totals are identical on both devices", JSON.stringify(sumA) === JSON.stringify(sumB), { sumA, sumB });
+  /* ═══════════ التقارير ═══════════ */
+  group("التقارير");
+  r = await api.get("/reports/dashboard");
+  check("لوحة التحكم", r.status === 200 && r.data.today && r.data.inventory && r.data.grand, r.status);
+  check("today.cash عدد (إصلاح cashFlow)", typeof r.data.today.cash === "number", typeof r.data.today.cash);
+  check("today.cashIn عدد", typeof r.data.today.cashIn === "number", typeof r.data.today.cashIn);
+  check("عمليات أخيرة", Array.isArray(r.data.recentInvoices) && Array.isArray(r.data.recentPurchases), true);
+  r = await api.get("/reports/sales?group=day");
+  check("مبيعات باليوم", r.status === 200 && r.data.rows.length >= 1, r.data.rows && r.data.rows.length);
+  r = await api.get("/reports/sales?group=product");
+  check("مبيعات بالمنتج", r.status === 200 && r.data.rows.every(x => x.productId), r.data.rows && r.data.rows.length);
+  r = await api.get("/reports/sales?group=method");
+  check("مبيعات بالطريقة", r.status === 200 && r.data.rows.length >= 1, r.data.rows);
+  r = await api.get("/reports/pnl");
+  check("الأرباح والخسائر", r.status === 200 && r.data.sales && r.data.expenses && typeof r.data.netProfit === "number", r.data);
+  check("pnl: صافي = ربح − مصروفات", near(r.data.netProfit, r.data.sales.profit - r.data.expenses.total, 0.02), r.data.netProfit);
+  r = await api.get("/reports/inventory");
+  check("تقرير المخزون", r.status === 200 && r.data.value && Array.isArray(r.data.lowStock), r.data.value);
 
-    /* B writes, A reads */
-    await B.post("/api/sales", { product: "كيبل من الجهاز الثاني", qty: 1, price: 12, wholesale: 5, payment: "card" });
-    await B.post("/api/notes", { text: "ملاحظة من الجهاز الثاني" });
-    const backOnA = await A.get("/api/bootstrap");
-    check("a sale made on Phone B appears on Phone A",
-      backOnA.data.sales.some(s => s.product === "كيبل من الجهاز الثاني"));
-    check("a note made on Phone B appears on Phone A",
-      backOnA.data.notes.some(n => n.text === "ملاحظة من الجهاز الثاني"));
-    check("both devices agree on the running totals",
-      (await A.get("/api/sales/summary")).data.summary.total === (await B.get("/api/sales/summary")).data.summary.total);
+  /* ═══════════ إغلاق اليوم ═══════════ */
+  group("إغلاق اليوم وتجميده");
+  r = await api.get("/cashbox");
+  const balBeforeClose = r.data.balance;
+  r = await api.post("/days/" + dayId + "/close");
+  check("إغلاق اليوم", r.status === 200 && r.data.cashBalanceAtClose !== null, r.data);
+  r = await api.post("/days/" + dayId + "/close");
+  check("إغلاق يوم مغلق مرفوض", r.status === 409, r.status);
+  r = await api.post("/sales", { items: [{ name: "بعد الإغلاق", qty: 1, wholesale: 0, selling: 5 }], payment: "cash" });
+  check("بيع بعد الإغلاق مرفوض", r.status === 409 && r.data.error === "no_open_day", r.data);
+  r = await api.get("/days/" + dayId);
+  check("حزمة اليوم مجمّدة", r.data.frozen === true && r.data.sales.length > 0 && r.data.cashMovements.length > 0, { s: r.data.sales.length, c: r.data.cashMovements.length });
+  check("رصيد الإغلاق مطابق", near(r.data.cashBalanceAtClose, balBeforeClose, 0.01), { close: r.data.cashBalanceAtClose, live: balBeforeClose });
+  const closedTotals = r.data.totals;
+  check("totals.cash عدد بعد التجميد", typeof closedTotals.cash === "number", typeof closedTotals.cash);
+  check("totals.cashFlow كائن", closedTotals.cashFlow && typeof closedTotals.cashFlow.in === "number", closedTotals.cashFlow);
+  r = await api.post("/days", { date: today });
+  check("إعادة فتح نفس التاريخ مرفوضة", r.status === 409 && r.data.error === "day_exists", r.data);
 
-    /* settings follow the account */
-    await A.put("/api/settings", { lang: "en", theme: "light" });
-    const sB = await B.get("/api/settings");
-    check("interface settings follow the account across devices",
-      sB.data.settings.lang === "en" && sB.data.settings.theme === "light", sB.data);
-    await A.put("/api/settings", { lang: "ar", theme: "dark" });
-    check("Arabic remains the stored default after reset",
-      (await B.get("/api/settings")).data.settings.lang === "ar");
-  }
+  /* ═══════════ الإعدادات وطرق الدفع ═══════════ */
+  group("الإعدادات");
+  r = await api.put("/settings", { shopName: "محل الاختبار", currency: "د.ل", shopPhone: "0910000000", defaultMinStock: 4 });
+  check("حفظ إعدادات المحل", r.status === 200 && r.data.settings.shop_name === "محل الاختبار" && r.data.settings.default_min_stock === 4, r.data.settings);
+  r = await api.put("/payment-methods", { code: "unpaid", active: false });
+  check("تعطيل «غير خالص»", r.status === 200 && r.data.method.active === false, r.data);
+  r = await api.put("/payment-methods", { code: "cash", active: false });
+  check("تعطيل النقد مرفوض (مثبّت)", r.status === 400, r.data);
+  r = await api.get("/payment-methods");
+  check("قراءة الطرق", r.status === 200 && r.data.methods.length === 3, r.data.methods && r.data.methods.length);
+  r = await api.put("/payment-methods", { code: "unpaid", active: true });
 
-  /* ---------------- 8. closing the day ---------------- */
-  group("8. Day closing persists for every device");
-  {
-    const beforeClose = (await A.get("/api/sales/summary")).data.summary;
-    const closed = await A.post("/api/days/" + dayId + "/close");
-    check("day closes", closed.status === 200 && closed.data.day.status === "closed", closed.data);
-    check("closing returns the final summary",
-      closed.data.totals.total === beforeClose.total && closed.data.totals.profit === beforeClose.profit, closed.data.totals);
-    check("closing counts the notes without adding them to money",
-      closed.data.noteCount === 3 && closed.data.totals.total === beforeClose.total, closed.data);
+  /* ═══════════ النسخ الاحتياطي ═══════════ */
+  group("النسخ الاحتياطي والاسترجاع");
+  r = await api.get("/backup");
+  check("تنزيل نسخة", r.status === 200 && r.data.data && Array.isArray(r.data.data.invoices), r.data.data && Object.keys(r.data.data).length);
+  const backup = r.data.data;
+  const invoiceCount = backup.invoices.length;
+  check("النسخة فيها فواتير", invoiceCount >= 4, invoiceCount);
+  r = await api.post("/backup/restore", { confirm: "RESTORE", data: { garbage: true } });
+  check("استرجاع ملف تالف مرفوض", r.status === 400 && r.data.error === "backup_invalid", r.data);
+  r = await api.del("/data", { confirm: "DELETE" });
+  check("تصفير قبل الاسترجاع", r.status === 200);
+  r = await api.post("/backup/restore", { confirm: "RESTORE", data: backup });
+  check("استرجاع النسخة", r.status === 200, r.data);
+  r = await api.get("/bootstrap");
+  check("الفواتير رجعت", r.data.invoices.length === invoiceCount, { got: r.data.invoices.length, want: invoiceCount });
+  check("الأيام رجعت (لا يوجد يوم مفتوح)", r.data.days.every(d => d.status === "closed"), r.data.days && r.data.days.length);
+  r = await api.get("/cashbox");
+  check("الرصيد رجع", near(r.data.balance, balBeforeClose, 0.01), { got: r.data.balance, want: balBeforeClose });
 
-    const again = await A.post("/api/days/" + dayId + "/close");
-    check("a closed day cannot be closed twice", again.status === 409, again.data);
+  /* ═══════════ bootstrap النهائي ═══════════ */
+  group("الإقلاع النهائي");
+  r = await api.get("/bootstrap");
+  const b = r.data;
+  check("شكل bootstrap", b.user && b.settings && Array.isArray(b.days) && Array.isArray(b.invoices) &&
+    Array.isArray(b.purchases) && Array.isArray(b.products) && Array.isArray(b.categories) &&
+    Array.isArray(b.notes) && typeof b.cashBalance === "number" && b.grand, true);
+  check("الفواتير تحمل بنودها", b.invoices.every(i => Array.isArray(i.items)), true);
+  check("المنتجات فيها active/kind", b.products.every(p => typeof p.active === "boolean" && (p.kind === "phone" || p.kind === "accessory")), true);
 
-    const late = await A.post("/api/sales", { product: "بعد الإغلاق", qty: 1, price: 10, wholesale: 5, payment: "cash" });
-    check("no new sale can be added once the day is closed", late.status === 409, late.data);
-    const sales = (await A.get("/api/sales?dayId=" + dayId)).data.sales;
-    const edit = await A.put("/api/sales/" + sales[0].id, { product: "تعديل", qty: 1, price: 1, wholesale: 0, payment: "cash" });
-    check("sales in a closed day cannot be edited", edit.status === 409, edit.data);
-    const rm = await A.del("/api/sales/" + sales[0].id);
-    check("sales in a closed day cannot be deleted", rm.status === 409, rm.data);
-    const noteAfter = await A.post("/api/notes", { dayId, text: "ملاحظة بعد الإغلاق" });
-    check("notes cannot be added to a closed day", noteAfter.status === 409, noteAfter.data);
-
-    const detail = await A.get("/api/days/" + dayId);
-    check("the closed day's sales stay visible", detail.data.sales.length === 3, detail.data.sales.length);
-    check("the closed day's notes stay visible", detail.data.notes.length === 3, detail.data.notes.length);
-    check("the closed day's summary stays visible", detail.data.totals.total === beforeClose.total);
-    check("nothing was destroyed by closing",
-      detail.data.sales.length > 0 && detail.data.notes.length > 0);
-
-    /* B must see the lock — this is the whole point of storing it */
-    const bDay = (await B.get("/api/days")).data.days.find(d => d.id === dayId);
-    check("Phone B sees the day as closed", bDay.status === "closed", bDay);
-    const bLate = await B.post("/api/sales", { product: "من الجهاز الثاني بعد الإغلاق", qty: 1, price: 10, wholesale: 5, payment: "cash" });
-    check("Phone B also cannot sell into the closed day", bLate.status === 409, bLate.data);
-    const bReports = (await B.get("/api/days?status=closed")).data.reports;
-    check("Phone B sees the closed day in reports with the same figures",
-      bReports.some(r => r.sessionId === dayId && r.totals.total === beforeClose.total), bReports);
-  }
-
-  /* ---------------- 9. no inventory ---------------- */
-  group("9. Still a sales ledger only");
-  {
-    const boot = (await A.get("/api/bootstrap")).data;
-    const keys = new Set(Object.keys(boot).concat(Object.keys(boot.sales[0] || {})));
-    const forbidden = [...keys].filter(k => /stock|inventory|warehouse|supplier|purchase|on_hand|reorder/i.test(k));
-    check("no stock/inventory fields anywhere in the API payload", forbidden.length === 0, forbidden);
-    check("product names carry no quantity",
-      (await A.get("/api/products?q=جوال")).data.suggestions.every(s => !("stock" in s) && !("quantity" in s)));
-  }
-
-  console.log("\n========================================");
-  console.log("  PASSED: " + pass + "   FAILED: " + fail);
-  console.log("========================================\n");
-  process.exit(fail ? 1 : 0);
-})().catch(err => { console.error("suite crashed:", err); process.exit(1); });
+  console.log("\n══════════════════════════════");
+  console.log("نجح: " + pass + " · فشل: " + fail);
+  if (fail) process.exit(1);
+})().catch(e => { console.error("CRASH:", e); process.exit(1); });

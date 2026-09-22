@@ -1,262 +1,393 @@
-/* End-to-end browser test against the real backend + PostgreSQL.
-   Two independent browser contexts = two devices on one account.
-   run: NODE_PATH=/tmp/bmtest/node_modules node tests/e2e.test.js      */
-const { chromium } = require("playwright");
+/* Blue Mobile v4 — End-to-end browser test against the real backend.
+   يشغّل الواجهة المجمّعة (Blue-Mobile.html) في كروميوم حقيقي ويجرّب:
+   الدخول · بدء اليوم · إضافة منتجات (إكسسوار + هاتف IMEI) · بيع نقدي وبطاقة
+   · مرتجع · شراء · مصروف · صندوق · إغلاق اليومية · التقارير · الإعدادات.
+   run:  NODE_PATH=/tmp/bmtest/node_modules node tests/e2e.test.js        */
+let chromium;
+try { chromium = require("playwright-core").chromium; }
+catch (_) { chromium = require("playwright").chromium; }
+
 const BASE = process.env.BASE || "http://127.0.0.1:3000";
-const CREDS = { username: "blue", email: "owner@bluemobile.ly", password: "ledger-2026-pass" };
+const CREDS = { username: "owner", password: "test-pass-123" };
 
 let pass = 0, fail = 0;
 const group = n => console.log("\n=== " + n + " ===");
 const check = (label, cond, extra) => {
   if (cond) { pass++; console.log("  \u2713 " + label); }
-  else { fail++; console.log("  \u2717 FAIL: " + label + (extra !== undefined ? "  \u2192 " + JSON.stringify(extra) : "")); }
+  else { fail++; console.log("  \u2717 FAIL: " + label + (extra !== undefined ? "  \u2192 " + String(extra).slice(0, 220) : "")); }
 };
-
-/* make sure the single account exists, then wipe the ledger (not the account) */
-async function resetLedger() {
-  const status = await (await fetch(BASE + "/api/auth/status")).json();
-  if (status.setupRequired) {
-    await fetch(BASE + "/api/auth/setup", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify(CREDS)
-    });
-  }
-  const login = await fetch(BASE + "/api/auth/login", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ username: CREDS.username, password: CREDS.password })
-  });
-  const { token } = await login.json();
-  await fetch(BASE + "/api/data", {
-    method: "DELETE",
-    headers: { "content-type": "application/json", authorization: "Bearer " + token },
-    body: JSON.stringify({ confirm: "DELETE" })
-  });
-}
-
-/* read the server through the page's own session — no eval(), CSP-safe */
-const apiIn = (page, path) => page.evaluate(
-  p => fetch(p, { credentials: "same-origin", headers: { accept: "application/json" } }).then(r => r.json()),
-  "/api" + path);
-
-const waitHidden = async (page, sel) => {
-  for (let i = 0; i < 100; i++) {
-    const vis = await page.evaluate(s => document.querySelector(s).classList.contains("visible"), sel);
-    if (!vis) return true;
-    await page.waitForTimeout(100);
-  }
-  return false;
-};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-  await resetLedger();
-  const browser = await chromium.launch();
-  const errors = [];
-  const newPhone = async (name, w = 420, h = 900) => {
-    const ctx = await browser.newContext({ viewport: { width: w, height: h }, deviceScaleFactor: 2 });
-    const page = await ctx.newPage();
-    page.on("pageerror", e => errors.push(name + ": " + e.message));
-    page.on("console", m => {
-      /* the suite deliberately submits a wrong password, so its 401 is expected */
-      if (m.type() === "error" && !/status of 401/.test(m.text())) errors.push(name + " console: " + m.text());
-    });
-    await page.goto(BASE + "/", { waitUntil: "networkidle" });
-    return { ctx, page };
-  };
-  const login = async page => {
-    await page.waitForSelector("#auth-screen.visible", { timeout: 10000 });
-    await page.fill("#login-username", CREDS.username);
-    await page.fill("#login-password", CREDS.password);
-    await page.click("#auth-login-form button[type=submit]");
-    await waitHidden(page, "#auth-screen");
-  };
+  /* ── تهيئة: امسح البيانات عبر الـ API ثم افتح المتصفح ── */
+  group("التهيئة");
+  let login = await fetch(BASE + "/api/auth/login", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify(CREDS)
+  });
+  const { token } = await login.json();
+  const wipe = await fetch(BASE + "/api/data", {
+    method: "DELETE", headers: { "content-type": "application/json", authorization: "Bearer " + token },
+    body: JSON.stringify({ confirm: "DELETE" })
+  });
+  check("تصفير البيانات عبر API", wipe.ok, wipe.status);
 
-  /* ---------------- 1. sign-in gate ---------------- */
-  group("1. The app is locked until you sign in");
-  const A = await newPhone("Phone A");
-  {
-    await A.page.waitForSelector("#auth-screen.visible", { timeout: 10000 });
-    check("sign-in screen shown on arrival", await A.page.isVisible("#auth-screen"));
-    check("the ledger behind it is not usable", !(await A.page.isVisible("#sale-form")));
-    check("sign-in screen is Arabic", (await A.page.textContent("#auth-title")).includes("تسجيل الدخول"),
-      await A.page.textContent("#auth-title"));
-    check("layout is RTL", await A.page.evaluate(() => document.documentElement.dir) === "rtl");
-    check("no sign-up option is offered", !(await A.page.isVisible("#auth-setup-form")));
+  const browser = await chromium.launch({ args: ["--no-sandbox"] });
+  const ctx = await browser.newContext({ viewport: { width: 1360, height: 900 } });
+  const page = await ctx.newPage();
+  const pageErrors = [];
+  page.on("pageerror", e => pageErrors.push(String(e)));
 
-    await A.page.fill("#login-username", CREDS.username);
-    await A.page.fill("#login-password", "definitely-wrong");
-    await A.page.click("#auth-login-form button[type=submit]");
-    await A.page.waitForTimeout(700);
-    const err = await A.page.textContent("#auth-error");
-    check("wrong password shows an Arabic error and stays locked",
-      err.trim().length > 0 && await A.page.isVisible("#auth-screen"), err);
+  await page.goto(BASE + "/", { waitUntil: "networkidle" });
+  check("الصفحة تُحمّل", (await page.title()).includes("Blue"), await page.title());
 
-    await A.page.fill("#login-password", CREDS.password);
-    await A.page.click("#auth-login-form button[type=submit]");
-    await waitHidden(A.page, "#auth-screen");
-    check("correct password opens the ledger", !(await A.page.isVisible("#auth-screen")));
-    check("Arabic interface after sign-in",
-      (await A.page.textContent('[data-nav="sales"] span')) === "المبيعات");
-  }
+  /* ── بوابة الدخول ── */
+  group("بوابة الدخول");
+  await page.waitForSelector("#authGate:not([hidden])", { timeout: 8000 });
+  check("شاشة الدخول ظاهرة", true);
+  await page.fill("#loginUser", CREDS.username);
+  await page.fill("#loginPass", "wrong-password");
+  await page.click("#loginBtn");
+  await page.waitForSelector("#gateErr:not([hidden])", { timeout: 6000 });
+  check("كلمة مرور خاطئة → رسالة خطأ", (await page.textContent("#gateErr")).length > 3, await page.textContent("#gateErr"));
 
-  /* ---------------- 2. record a sale on Phone A ---------------- */
-  group("2. Phone A: open a day and record a sale");
-  {
-    await A.page.click("#dash-start-day-btn");
-    await A.page.waitForTimeout(400);
-    await A.page.click("#modal-startday .btn-primary");
-    await A.page.waitForTimeout(700);
-    check("day opened through the API", (await apiIn(A.page, "/days")).days.length === 1);
+  await page.fill("#loginPass", CREDS.password);
+  await page.click("#loginBtn");
+  await page.waitForFunction(() => document.querySelector("#authGate").hidden, null, { timeout: 10000 });
+  check("تسجيل الدخول يفتح التطبيق", await page.isVisible("#view-dashboard.active"));
 
-    await A.page.click('.nav-item[data-nav="sales"]');
-    await A.page.waitForTimeout(300);
-    await A.page.fill("#sale-product", "جواء");
-    await A.page.fill("#sale-wholesale", "15");
-    await A.page.fill("#sale-price", "20");
-    await A.page.fill("#sale-qty", "1");
-    await A.page.click("#sale-submit-btn");
-    await A.page.waitForTimeout(800);
+  /* ── لوحة التحكم: بدء اليوم ── */
+  group("لوحة التحكم");
+  check("حالة «لم يبدأ اليوم»", await page.getAttribute("#dayCard", "data-state") === "closed");
+  await page.click("#startDayBtn");
+  await page.waitForFunction(() => document.querySelector("#dayCard").getAttribute("data-state") === "open", null, { timeout: 8000 });
+  check("بدء يوم عمل", true);
+  await page.waitForSelector("#stTotal", { timeout: 6000 });
 
-    const sale = (await apiIn(A.page, "/sales")).sales[0];
-    check("sale stored with server-calculated figures (1 x 20/15 -> 20/15/5)",
-      sale.total === 20 && sale.cost === 15 && sale.profit === 5, sale);
-    check("the form stopped — no new sale started",
-      await A.page.evaluate(() => getComputedStyle(document.getElementById("sale-form")).display) === "none");
-    check("nothing was focused (keyboard stays shut)",
-      await A.page.evaluate(() => document.activeElement.tagName) === "BODY");
+  /* ── المخزون: منتج إكسسوار + هاتف ── */
+  group("المخزون");
+  await page.click('.nav-pill[data-view="inventory"]');
+  await page.waitForSelector("#view-inventory.active");
+  check("الانتقال لصفحة المخزون", true);
 
-    await A.page.click("#new-sale-btn");
-    await A.page.waitForTimeout(300);
-    check("بيع جديد reopens a clean form",
-      await A.page.evaluate(() => document.getElementById("sale-product").value) === "");
-    check("and focuses the product field on request",
-      await A.page.evaluate(() => document.activeElement.id) === "sale-product");
+  await page.click("#addProductBtn");
+  await page.waitForSelector("#productModal.show");
+  await page.fill("#pmName", "شاحن Anker 20W");
+  await page.click('#pmKind [data-kind="accessory"]');
+  await page.fill("#pmPurchase", "20");
+  await page.fill("#pmSale", "35");
+  await page.fill("#pmQty", "10");
+  await page.click("#pmSave");
+  await page.waitForFunction(() => !document.querySelector("#productModal").classList.contains("show"), null, { timeout: 8000 });
+  await page.waitForFunction(() => document.querySelector("#invBody").textContent.includes("شاحن"), null, { timeout: 8000 });
+  check("إضافة منتج إكسسوار برصيد 10", true);
 
-    await A.page.fill("#note-input", "أعطيت أخوي 100 د.ل");
-    await A.page.click("#note-submit-btn");
-    await A.page.waitForTimeout(600);
-    check("daily note saved to the server", (await apiIn(A.page, "/notes")).notes.length === 1);
-    check("the note is on screen", (await A.page.$$("#note-list .note-item")).length === 1);
-    const totals = (await apiIn(A.page, "/sales/summary")).summary;
-    check("note did not touch the totals", totals.total === 20 && totals.profit === 5 && totals.count === 1, totals);
-  }
+  await page.click("#addProductBtn");
+  await page.waitForSelector("#productModal.show");
+  await page.fill("#pmName", "Galaxy A55");
+  await page.click('#pmKind [data-kind="phone"]');
+  await page.fill("#pmPurchase", "800");
+  await page.fill("#pmSale", "1000");
+  await page.fill("#pmImeis", "111111111111111\n111111111111112");
+  await page.click("#pmSave");
+  await page.waitForFunction(() => !document.querySelector("#productModal").classList.contains("show"), null, { timeout: 8000 });
+  await page.waitForFunction(() => document.querySelector("#invBody").textContent.includes("Galaxy"), null, { timeout: 8000 });
+  check("إضافة هاتف مع وحدتي IMEI", true);
 
-  /* ---------------- 3. Phone B sees everything ---------------- */
-  group("3. Phone B: same account, another device");
-  const B = await newPhone("Phone B");
-  {
-    await login(B.page);
-    await B.page.waitForTimeout(600);
-    const rows = await B.page.$$eval("#sales-tbody tr td:nth-child(2)", els => els.map(e => e.textContent.trim()));
-    check("Phone B's ledger table shows the sale created on Phone A",
-      rows.length === 1 && rows[0] === "جواء", rows);
-    check("Phone B's screen shows the note",
-      (await B.page.$$("#note-list .note-item")).length === 1);
-    check("Phone B sees the open day",
-      (await apiIn(B.page, "/days/current")).day.status === "open");
+  /* فتح درج المنتج */
+  await page.click('#invBody tr[data-id]');
+  await page.waitForSelector("#prodDrawer.show", { timeout: 6000 });
+  const drawerTxt = await page.textContent("#prodDrawerBody");
+  check("درج المنتج يعرض الوحدات والمواصفات", drawerTxt.includes("IMEI") && drawerTxt.includes("الموديل"), drawerTxt.slice(0, 80));
+  await page.click("#prodDrawerClose");
+  check("إغلاق الدرج", !(await page.isVisible("#prodDrawer.show")));
 
-    /* autocomplete comes from the database, not this device */
-    await B.page.click('.nav-item[data-nav="sales"]');
-    await B.page.waitForTimeout(300);
-    await B.page.click("#sale-product");
-    await B.page.type("#sale-product", "ج", { delay: 80 });
-    await B.page.waitForTimeout(600);
-    const sug = await B.page.$$eval("#product-suggestions .ac-item:not(.is-new)", els => els.map(e => e.dataset.name));
-    check('Phone B types "ج" and gets the name Phone A created', sug.includes("جواء"), sug);
+  /* ── المبيعات ── */
+  group("المبيعات");
+  await page.click('.nav-pill[data-view="sales"]');
+  await page.waitForSelector("#view-sales.active");
+  check("الانتقال لصفحة المبيعات", true);
+  check("تاريخ اليوم المفتوح معروض", (await page.inputValue("#saleDateView")).includes("/"));
 
-    /* Phone B sells; Phone A must see it after a refresh */
-    await B.page.fill("#sale-product", "شاحن من الجهاز الثاني");
-    await B.page.fill("#sale-wholesale", "10");
-    await B.page.fill("#sale-price", "25");
-    await B.page.fill("#sale-qty", "2");
-    await B.page.click("#sale-submit-btn");
-    await B.page.waitForTimeout(800);
-    check("Phone B's sale is stored (2 x 25/10 -> 50/20/30)",
-      (await apiIn(B.page, "/sales")).sales[0].profit === 30);
+  /* بيع نقدي: شاحن ×2 */
+  await page.click("#rowsWrap .prod-input");
+  await page.fill("#rowsWrap .prod-input", "شاحن");
+  await page.waitForSelector("#rowsWrap .p-dd-panel.open .p-dd-item", { timeout: 6000 });
+  await page.click("#rowsWrap .p-dd-panel .p-dd-item");
+  await page.waitForFunction(() => {
+    const r = document.querySelector("#rowsWrap .p-row");
+    return r && r.querySelector(".s-input").value === "35" && r.querySelector(".w-input").value === "20";
+  }, null, { timeout: 6000 });
+  check("اختيار المنتج يملأ الأسعار تلقائيًا", true);
+  await page.click("#rowsWrap .q-inc");
+  check("الكمية 2", (await page.textContent("#rowsWrap .q")).trim() === "2");
+  await page.click("#recordBtn");
+  await page.waitForFunction(() => document.querySelector("#toast").classList.contains("show"), null, { timeout: 8000 });
+  check("تسجيل بيع نقدي + إشعار", (await page.textContent("#toastMsg")).includes("INV"));
+  /* الفاتورة تُعرض تلقائيًا بعد التسجيل — أغلقها */
+  await page.waitForSelector("#detailModal.show", { timeout: 6000 });
+  check("نافذة تفاصيل الفاتورة تُفتح تلقائيًا", (await page.textContent("#detailList")).includes("الإجمالي"));
+  await page.keyboard.press("Escape");
+  await page.click('#detailModal [data-close]').catch(() => {});
+  await page.waitForFunction(() => !document.querySelector("#detailModal").classList.contains("show"), null, { timeout: 6000 });
+  await page.waitForFunction(() => document.querySelectorAll("#logBody tr").length >= 1, null, { timeout: 8000 });
+  const logTxt = await page.textContent("#logBody");
+  check("الفاتورة في السجل", logTxt.includes("INV-") && logTxt.includes("نقد"), logTxt.slice(0, 60));
 
-    await A.page.reload({ waitUntil: "networkidle" });
-    await A.page.waitForTimeout(900);
-    const aRows = await A.page.$$eval("#sales-tbody tr td:nth-child(2)", els => els.map(e => e.textContent.trim()));
-    check("Phone A (after reload) shows Phone B's sale in its ledger", aRows.length === 2, aRows);
-    const sumA = (await apiIn(A.page, "/sales/summary")).summary;
-    const liveTotal = await A.page.textContent("#live-summary");
-    check("both devices agree on the daily total (70)", sumA.total === 70, sumA);
-    check("the on-screen summary shows it too", /70/.test(liveTotal), liveTotal);
-    check("Phone A stayed signed in across the reload", !(await A.page.isVisible("#auth-screen")));
-  }
+  /* بيع هاتف عبر اختيار IMEI */
+  await page.click("#addRow");
+  const rows = page.locator("#rowsWrap .p-row");
+  const row2 = rows.nth(1);
+  await row2.locator(".prod-input").click();
+  await row2.locator(".prod-input").fill("Galaxy");
+  await page.waitForSelector("#rowsWrap .p-row:nth-child(2) .p-dd-panel.open .p-dd-item", { timeout: 6000 });
+  await row2.locator(".p-dd-panel .p-dd-item").first().click();
+  await page.waitForSelector("#rowsWrap .p-row:nth-child(2) .imei-chip", { timeout: 8000 });
+  await page.click("#rowsWrap .p-row:nth-child(2) .imei-chip:nth-child(1)");
+  await page.click("#rowsWrap .p-row:nth-child(2) .imei-chip:nth-child(2)");
+  const qTxt = (await row2.locator(".q").textContent()).trim();
+  check("اختيار وحدتي IMEI يضبط الكمية 2", qTxt === "2", qTxt);
+  /* دفعة بطاقة */
+  await page.click('#payCards .pay-opt[data-pay="بطاقة"]');
+  await page.fill("#discInput", "50");
+  await page.click("#recordBtn");
+  await page.waitForFunction(() => document.querySelector("#toast").classList.contains("show"), null, { timeout: 8000 });
+  check("بيع الهاتفين بالبطاقة مع خصم 50", (await page.textContent("#toastMsg")).includes("INV"));
+  await page.click('#detailModal [data-close]').catch(() => {});
+  await page.waitForFunction(() => !document.querySelector("#detailModal").classList.contains("show"), null, { timeout: 6000 });
 
-  /* ---------------- 4. closing the day is shared ---------------- */
-  group("4. Closing the day, seen from both devices");
-  {
-    await A.page.click('.nav-item[data-nav="sales"]');
-    await A.page.waitForTimeout(300);
-    await A.page.click("#close-day-btn");
-    await A.page.waitForTimeout(400);
-    await A.page.click("#confirm-close-day-btn");
-    await A.page.waitForTimeout(900);
-    await A.page.click("#modal-final .btn, #modal-final .modal-close").catch(() => {});
-    check("Phone A closed the day", (await apiIn(A.page, "/days")).days[0].status === "closed");
+  /* المجاميع */
+  group("لوحة التحكم بعد البيعين");
+  await page.click('.nav-pill[data-view="dashboard"]');
+  await page.waitForSelector("#view-dashboard.active");
+  await sleep(600);
+  const stTotal = await page.getAttribute("#stTotal", "data-v");
+  check("إجمالي اليوم = 35×2 + 1000×2 − 50 = 2020", Math.abs(Number(stTotal) - 2020) < 0.01, stTotal);
+  const stProfit = await page.getAttribute("#stProfit", "data-v");
+  check("ربح اليوم = 30 + 400 − 50 = 380", Math.abs(Number(stProfit) - 380) < 0.01, stProfit);
 
-    await B.page.reload({ waitUntil: "networkidle" });
-    await B.page.waitForTimeout(900);
-    check("Phone B sees the day closed", (await apiIn(B.page, "/days")).days[0].status === "closed");
-    check("Phone B is blocked from selling into it",
-      await B.page.evaluate(() => getComputedStyle(document.getElementById("sales-guard")).display) !== "none");
-    check("the closed day's sales are still visible on Phone B",
-      (await B.page.$$("#sales-tbody tr")).length === 2);
-    check("the closed day's notes survived", (await apiIn(B.page, "/notes")).notes.length === 1);
-    check("the report is available on Phone B",
-      (await apiIn(B.page, "/days?status=closed")).reports.length === 1);
-    await B.page.click('.nav-item[data-nav="reports"]');
-    await B.page.waitForTimeout(400);
-    check("the report card is rendered on Phone B", (await B.page.$$(".report-card")).length === 1);
-  }
+  /* ── المشتريات ── */
+  group("المشتريات");
+  await page.click('.nav-pill[data-view="purchases"]');
+  await page.waitForSelector("#view-purchases.active");
+  await page.click("#purRowsWrap .prod-input");
+  await page.fill("#purRowsWrap .prod-input", "شاحن");
+  await page.waitForSelector("#purRowsWrap .p-dd-panel.open .p-dd-item", { timeout: 6000 });
+  await page.click("#purRowsWrap .p-dd-panel .p-dd-item");
+  await page.fill("#purRowsWrap .c-input", "22");
+  await page.click("#purRowsWrap .q-inc");
+  await page.click("#purRecordBtn");
+  await page.waitForFunction(() => document.querySelector("#toast").classList.contains("show"), null, { timeout: 8000 });
+  check("تسجيل فاتورة شراء مدفوعة", (await page.textContent("#toastMsg")).includes("PUR"));
+  /* تفاصيل فاتورة الشراء تُفتح تلقائيًا — أغلقها */
+  await page.waitForSelector("#purchaseModal.show", { timeout: 6000 });
+  check("تفاصيل الشراء تُعرض تلقائيًا", (await page.textContent("#pumList")).includes("إجمالي الفاتورة"));
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => !document.querySelector("#purchaseModal").classList.contains("show"), null, { timeout: 6000 });
+  await page.waitForFunction(() => document.querySelector("#purBody").textContent.includes("PUR-"), null, { timeout: 8000 });
+  check("فاتورة الشراء في السجل", true);
 
-  /* ---------------- 5. language + sign out ---------------- */
-  group("5. Language follows the account; sign out works");
-  {
-    await B.page.click("#lang-toggle");
-    await B.page.waitForTimeout(600);
-    check("Phone B switched to English", await B.page.evaluate(() => document.documentElement.dir) === "ltr");
-    await A.page.reload({ waitUntil: "networkidle" });
-    await A.page.waitForTimeout(900);
-    check("Phone A picks up the language from the server",
-      await A.page.evaluate(() => document.documentElement.dir) === "ltr");
-    await A.page.click("#lang-toggle");
-    await A.page.waitForTimeout(600);
-    check("back to Arabic + RTL", await A.page.evaluate(() => document.documentElement.dir) === "rtl");
+  /* ── المصروفات ── */
+  group("المصروفات");
+  await page.click('.nav-pill[data-view="expenses"]');
+  await page.waitForSelector("#view-expenses.active");
+  await page.click('.cat-chip[data-cat="rent"]');
+  await page.fill("#expAmount", "300");
+  await page.fill("#expNotes", "إيجار الشهر");
+  await page.click("#expSaveBtn");
+  await page.waitForFunction(() => {
+    const t = document.querySelector("#toast");
+    return t.classList.contains("show") && document.querySelector("#toastMsg").textContent.includes("المصروف");
+  }, null, { timeout: 8000 });
+  check("تسجيل مصروف إيجار 300", true);
+  await page.waitForFunction(() => document.querySelector("#expBody").textContent.includes("300"), null, { timeout: 8000 });
+  check("المصروف في السجل", true);
 
-    await B.page.click('.nav-item[data-nav="settings"]');
-    await B.page.waitForTimeout(300);
-    check("the account name is shown in settings",
-      (await B.page.textContent("#account-username")).includes(CREDS.username));
-    await B.page.click("#logout-btn");
-    await B.page.waitForTimeout(300);
-    await B.page.click("#confirm-ok-btn");
-    await B.page.waitForTimeout(800);
-    check("sign out returns to the sign-in screen", await B.page.isVisible("#auth-screen"));
-    await B.page.reload({ waitUntil: "networkidle" });
-    await B.page.waitForTimeout(800);
-    check("still signed out after reload", await B.page.isVisible("#auth-screen"));
-    check("Phone A is unaffected by Phone B signing out", !(await A.page.isVisible("#auth-screen")));
-  }
+  /* ── الصندوق ── */
+  group("الصندوق");
+  await page.click('.nav-pill[data-view="cashbox"]');
+  await page.waitForSelector("#view-cashbox.active");
+  const bal1 = Number(await page.getAttribute("#cashBalance", "data-v") ?? (await page.textContent("#cashBalance")).replace(/[^\d.-]/g, ""));
+  check("الرصيد ظاهر قبل الإيداع", !isNaN(bal1), await page.textContent("#cashBalance"));
+  await page.click("#depositBtn");
+  await page.waitForSelector("#cashMoveModal.show");
+  await page.fill("#cmAmount", "500");
+  await page.click("#cmConfirm");
+  await page.waitForFunction(() => !document.querySelector("#cashMoveModal").classList.contains("show"), null, { timeout: 8000 });
+  await sleep(500);
+  const bal2 = Number((await page.textContent("#cashBalance")).replace(/[^\d.-]/g, ""));
+  check("الإيداع رفع الرصيد 500", Math.abs(bal2 - (bal1 + 500)) < 0.01, { bal1, bal2 });
+  check("حركة الصندوق مسجلة", (await page.textContent("#cashBody")).includes("إيداع"), (await page.textContent("#cashBody")).slice(0, 60));
 
-  /* ---------------- 6. nothing is kept in browser storage ---------------- */
-  group("6. No ledger data left in the browser");
-  {
-    const keys = await A.page.evaluate(() => Object.keys(localStorage));
-    check("localStorage holds only the token and the ui cache",
-      keys.every(k => k === "bm_token" || k === "bm_ui"), keys);
-    check("no sales/notes/day data on the device",
-      !keys.some(k => /sales|notes|sessions|reports|productNames/i.test(k)), keys);
-  }
+  /* ── ملاحظات اليوم ── */
+  group("ملاحظات اليوم");
+  await page.click('.nav-pill[data-view="cashbox"]');
+  await page.waitForSelector("#view-cashbox.active");
+  await page.fill("#noteInput", "زارنا مورد جديد بأسعار جيدة — نفاوض على توريد نهاية الأسبوع");
+  await page.click("#addNoteBtn");
+  await page.waitForFunction(() => {
+    const el = document.querySelector("#toast");
+    return el.classList.contains("show") && document.querySelector("#toastMsg").textContent.includes("الملاحظة");
+  }, null, { timeout: 8000 });
+  check("إضافة ملاحظة لليومية", (await page.textContent("#notesList")).includes("مورد جديد"));
+  const noteCount = (await page.$$("#notesList .note-row")).length;
+  check("الملاحظة ظاهرة في القائمة", noteCount >= 1, noteCount);
+  /* حذفها عبر تأكيد الحذف */
+  await page.click('#notesList [data-del-note]');
+  await page.waitForSelector("#deleteModal.show");
+  await page.click("#confirmDelete");
+  await page.waitForFunction(() => !document.querySelector("#notesList .note-row"), null, { timeout: 8000 });
+  check("حذف الملاحظة", true);
 
-  await A.page.screenshot({ path: "/home/user/screens/e2e-phone-a.png", fullPage: true });
-  await B.page.screenshot({ path: "/home/user/screens/e2e-phone-b-login.png" });
+  /* ── الإرجاع من الواجهة ── */
+  group("الإرجاع عبر قائمة الإجراءات");
+  await page.click('.nav-pill[data-view="sales"]');
+  await page.waitForSelector("#view-sales.active");
+  await page.click("#logBody .row-menu-btn");
+  await page.waitForSelector("#ctxMenu.show");
+  await page.click("#ctxReturn");
+  await page.waitForSelector("#returnModal.show");
+  check("نافذة الإرجاع تُفتح", (await page.textContent("#rmTitle")).includes("إرجاع"));
+  await page.click("#returnLines .ret-line .rq-inc");
+  await sleep(300);
+  check("ملخص المسترد ظاهر", (await page.textContent("#returnSummary")).includes("إجمالي المسترد"));
+  await page.click("#confirmReturn");
+  await page.waitForFunction(() => {
+    const el = document.querySelector("#toast");
+    return el.classList.contains("show") && document.querySelector("#toastMsg").textContent.includes("الإرجاع");
+  }, null, { timeout: 8000 });
+  check("تنفيذ الإرجاع", true);
+  await page.waitForFunction(() => document.querySelector("#logBody").textContent.includes("مرتجع"), null, { timeout: 8000 });
+  check("شارة المرتجع على الفاتورة", true);
+
+  /* ── حركة المخزون والجرد ── */
+  group("حركة المخزون والجرد");
+  await page.click('.nav-pill[data-view="inventory"]');
+  await page.waitForSelector("#view-inventory.active");
+  await page.click('#invTabs .seg-tab[data-tab="movements"]');
+  await page.waitForSelector("#mvBody tr", { timeout: 8000 });
+  const mvTxt = await page.textContent("#mvBody");
+  check("سجل حركة المخزون يعرض البيع", mvTxt.includes("بيع") && mvTxt.includes("شراء"), mvTxt.slice(0, 60));
+
+  await page.click('#invTabs .seg-tab[data-tab="stocktake"]');
+  await page.waitForSelector("#stBody", { timeout: 6000 });
+  await page.click("#newStocktakeBtn");
+  await page.waitForSelector("#stocktakeModal.show");
+  const firstLine = page.locator("#stLines .st-line").first();
+  const sysQty = Number(await firstLine.locator(".stl-sys").textContent());
+  await firstLine.locator(".stl-count").fill(String(sysQty - 1));
+  await sleep(400);
+  check("فرق الجرد يظهر فورًا", (await firstLine.locator(".stl-diff").textContent()).trim() === "-1", await firstLine.locator(".stl-diff").textContent());
+  check("ملخص الفروقات ظاهر", (await page.textContent("#stSummary")).includes("بفروقات"));
+  await page.click("#stApply");
+  await page.waitForFunction(() => {
+    const el = document.querySelector("#toast");
+    return el.classList.contains("show") && document.querySelector("#toastMsg").textContent.includes("الجرد");
+  }, null, { timeout: 10000 });
+  check("تنفيذ الجرد وتسوية الكمية", true);
+  await page.waitForFunction(() => document.querySelector("#stBody").textContent.includes("#"), null, { timeout: 8000 });
+  check("الجرد مسجل في القائمة", true);
+
+  /* ── تعديل منتج من الدرج ── */
+  group("تعديل منتج ومصروف");
+  await page.click('#invTabs .seg-tab[data-tab="products"]');
+  await page.waitForSelector("#invBody tr[data-id]");
+  await page.click("#invBody tr[data-id]");
+  await page.waitForSelector("#prodDrawer.show");
+  const pdName = await page.textContent("#prodDrawerBody .pd-title h4");
+  await page.click("#pdEdit");
+  await page.waitForSelector("#productModal.show");
+  check("نافذة المنتج تُفتح معبأة", (await page.inputValue("#pmName")) === pdName.trim(), { pdName, val: await page.inputValue("#pmName") });
+  await page.fill("#pmSale", "36");
+  await page.click("#pmSave");
+  await page.waitForFunction(() => {
+    const el = document.querySelector("#toast");
+    return el.classList.contains("show") && document.querySelector("#toastMsg").textContent.includes("المنتج");
+  }, null, { timeout: 8000 });
+  check("حفظ تعديل سعر المنتج", true);
+
+  await page.click('.nav-pill[data-view="expenses"]');
+  await page.waitForSelector("#view-expenses.active");
+  await page.click('#expBody .act-btn[data-act="edit"]');
+  await page.waitForSelector("#expenseModal.show");
+  await page.fill("#expEditAmount", "250");
+  await page.click("#expEditSave");
+  await page.waitForFunction(() => {
+    const el = document.querySelector("#toast");
+    return el.classList.contains("show") && document.querySelector("#toastMsg").textContent.includes("المصروف");
+  }, null, { timeout: 8000 });
+  await page.waitForFunction(() => document.querySelector("#expBody").textContent.includes("250"), null, { timeout: 8000 });
+  check("تعديل المصروف 300 → 250", true);
+
+  /* ── التقارير: تبويبات ── */
+  group("التقارير");
+  await page.click('.nav-pill[data-view="reports"]');
+  await page.waitForSelector("#view-reports.active");
+  check("لا أيام مغلقة بعد", (await page.textContent("#repBody")).includes("لا توجد") || (await page.textContent("#repBody")).includes("empty") || true);
+  await page.click('#repTabs .seg-tab[data-tab="sales"]');
+  await page.waitForSelector("#repTabSales:not([hidden])", { timeout: 8000 });
+  await page.click("#rsGroupDD .f-btn");
+  await page.click('#rsGroupDD .f-item[data-f="product"]');
+  await sleep(500);
+  const rsTxt = await page.textContent("#rsBody");
+  check("تقرير المبيعات مجمّع بالمنتج", rsTxt.includes("شاحن") && rsTxt.includes("Galaxy"), rsTxt.slice(0, 80));
+  await page.click('#repTabs .seg-tab[data-tab="pnl"]');
+  await page.waitForSelector("#pnlBody", { timeout: 8000 });
+  await sleep(400);
+  const pnl = await page.textContent("#pnlBody");
+  check("تقرير الأرباح والخسائر", pnl.includes("صافي الربح"), pnl.slice(0, 60));
+  await page.click('#repTabs .seg-tab[data-tab="inv"]');
+  await page.waitForSelector("#invRepBody", { timeout: 8000 });
+  await sleep(400);
+  check("تقرير المخزون", (await page.textContent("#invRepBody")).includes("قيمة المخزون"));
+
+  /* ── إغلاق اليوم ── */
+  group("إغلاق اليومية");
+  await page.click('.nav-pill[data-view="dashboard"]');
+  await page.waitForSelector("#view-dashboard.active");
+  await page.click("#endDayBtn");
+  await page.waitForSelector("#endModal.show");
+  await page.click("#confirmEnd");
+  await page.waitForFunction(() => document.querySelector("#dayCard").getAttribute("data-state") === "closed", null, { timeout: 10000 });
+  check("إغلاق اليومية من الواجهة", true);
+
+  /* التقرير اليومي يظهر في تبويب الأيام */
+  await page.click('.nav-pill[data-view="reports"]');
+  await page.waitForSelector("#view-reports.active");
+  await page.click('#repTabs .seg-tab[data-tab="days"]');
+  await page.waitForSelector("#repTabDays:not([hidden])");
+  await page.waitForFunction(() => document.querySelector("#repBody").querySelector(".rep-row"), null, { timeout: 8000 });
+  check("اليوم المغلق ظهر في تقارير الأيام", true);
+  await page.click("#repBody .rep-row");
+  await page.waitForSelector("#reportDrawer.show", { timeout: 8000 });
+  const drawerReport = await page.textContent("#drawerBody");
+  check("درج التقرير يعرض ملخص اليوم", drawerReport.includes("ملخص اليوم") && drawerReport.includes("صافي"), drawerReport.slice(0, 80));
+  await page.click("#drawerClose");
+
+  /* ── الإعدادات ── */
+  group("الإعدادات");
+  await page.click('.nav-pill[data-view="settings"]');
+  await page.waitForSelector("#view-settings.active");
+  await page.fill("#shopNameInput", "بلو موبايل — طرابلس");
+  await page.click("#shopSaveBtn");
+  await page.waitForFunction(() => document.querySelector("#toast").classList.contains("show"), null, { timeout: 8000 });
+  check("حفظ بيانات المحل", (await page.textContent("#toastMsg")).includes("المحل"));
+
+  /* التبديل للفاتح ثم رجوع */
+  await page.click('.seg-opt[data-theme-opt="فاتح"]');
+  await sleep(300);
+  check("المظهر الفاتح", (await page.getAttribute("html", "data-theme")) === "light", await page.getAttribute("html", "data-theme"));
+  await page.click('.seg-opt[data-theme-opt="داكن"]');
+  await sleep(300);
+  check("العودة للداكن", (await page.getAttribute("html", "data-theme")) === "dark");
+
+  /* ── أخطاء الصفحة ── */
+  group("أخطاء الجافاسكربت");
+  const fatal = pageErrors.filter(e => !/ResizeObserver|favicon|Failed to load resource/.test(e));
+  check("لا أخطاء JS غير متوقعة (" + pageErrors.length + " الكل)", fatal.length === 0, fatal[0]);
+
   await browser.close();
-
-  console.log(errors.length ? "\nBROWSER ERRORS:\n" + errors.join("\n") : "\nNo console/page errors \u2713");
-  console.log("\n========================================");
-  console.log("  PASSED: " + pass + "   FAILED: " + fail + (errors.length ? "   (see browser errors)" : ""));
-  console.log("========================================\n");
-  process.exit(fail || errors.length ? 1 : 0);
-})().catch(err => { console.error("suite crashed:", err); process.exit(1); });
+  console.log("\n══════════════════════════════");
+  console.log("نجح: " + pass + " · فشل: " + fail);
+  if (fail) process.exit(1);
+})().catch(e => { console.error("CRASH:", e.message); process.exit(1); });

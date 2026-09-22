@@ -1,14 +1,16 @@
 {
-  "name": "blue-mobile-sales-ledger",
-  "version": "3.0.0",
+  "name": "blue-mobile",
+  "version": "4.0.0",
   "private": true,
-  "description": "Blue Mobile — personal electronic sales ledger. Express + PostgreSQL backend, single account.",
+  "description": "Blue Mobile — منظومة إدارة محل الهواتف والإكسسوارات: مبيعات بفواتير ومرتجعات، مخزون بـ IMEI، مشتريات، مصروفات، صندوق، وتقارير. Express + PostgreSQL + واجهة عربية RTL.",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
+    "dev": "bash scripts/dev-up.sh",
     "migrate": "node server/migrate.js",
-    "test": "node tests/api.test.js && node tests/e2e.test.js",
-    "test:api": "node tests/api.test.js",
+    "seed": "node scripts/seed-demo.js",
+    "wipe": "node scripts/wipe.js",
+    "test": "node tests/api.test.js",
     "test:e2e": "node tests/e2e.test.js",
     "screens": "node tests/screens.js"
   },

@@ -53,11 +53,16 @@ api.use("/auth", require("./routes/auth"));
 
 /* everything below this line requires the single account to be signed in */
 api.use(auth.requireAuth);
-api.use("/sales",    require("./routes/sales"));
-api.use("/products", require("./routes/products"));
-api.use("/notes",    require("./routes/notes"));
-api.use("/days",     require("./routes/days"));
-api.use("/",         require("./routes/data"));      // settings, bootstrap, import, data
+api.use("/sales",     require("./routes/sales"));
+api.use("/products",  require("./routes/products"));     /* قاموس أسماء الإكمال التلقائي (قديم ومحفوظ) */
+api.use("/inventory", require("./routes/inventory"));    /* المخزون: منتجات/تصنيفات/وحدات/جرد */
+api.use("/purchases", require("./routes/purchases"));    /* المشتريات */
+api.use("/expenses",  require("./routes/expenses"));     /* المصروفات */
+api.use("/cashbox",   require("./routes/cashbox"));      /* الصندوق */
+api.use("/notes",     require("./routes/notes"));
+api.use("/days",      require("./routes/days"));
+api.use("/reports",   require("./routes/reports"));      /* لوحة التحكم والتقارير */
+api.use("/",          require("./routes/data"));         /* settings, bootstrap, backup, data */
 
 api.use((_req, _res, next) => next(new HttpError(404, "not_found", "Unknown endpoint")));
 app.use("/api", api);
@@ -67,16 +72,11 @@ const ROOT = path.join(__dirname, "..");
 const INDEX = path.join(ROOT, "Blue-Mobile.html");
 app.get("/", (_req, res) => res.sendFile(INDEX));
 app.get("/index.html", (_req, res) => res.redirect("/"));
-app.use(express.static(ROOT, {
-  index: false,
-  dotfiles: "deny",
-  setHeaders: res => res.setHeader("Cache-Control", "no-store"),
-  /* only the app file is public; server code, .env and the database stay private */
-  extensions: false
-}));
-/* block anything that is not the app itself */
+/* التطبيق فقط هو العام — كود الخادم وملف البيانات وغيرها لا تُقدَّم إطلاقاً */
 app.use((req, res, next) => {
-  if (req.method === "GET" && !req.path.startsWith("/api")) return res.sendFile(INDEX);
+  if (req.method === "GET" && !req.path.startsWith("/api")) {
+    return res.sendFile(INDEX);
+  }
   next();
 });
 
